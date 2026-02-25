@@ -59,7 +59,7 @@ else:
     CONFIG_FILE = os.path.join(os.path.dirname(__file__), "ip_config.txt")
 SERVER_PORT = 5050
 WIFI_SSID = "Engineering"
-WIFI_PASSWORD = "Csad!123"
+WIFI_STATUS_FILE = "/tmp/laptoptester_wifi_status.json"
 
 # ---------------------------------------------------
 # IP CONFIG
@@ -83,6 +83,50 @@ def save_ip(ip_address):
     except Exception as e:
         print("Could not save IP:", e)
 
+
+
+
+
+
+def get_wifi_interface():
+    """Compatibility helper for legacy calls; WiFi management lives in wifi_manager.py."""
+    net_path = "/sys/class/net"
+    if not os.path.exists(net_path):
+        return None
+
+    for iface in os.listdir(net_path):
+        if os.path.exists(os.path.join(net_path, iface, "wireless")):
+            return iface
+    return None
+
+
+def read_wifi_status_label():
+    """Read WiFi status produced by wifi_manager.py and return (text, color)."""
+    try:
+        if not os.path.exists(WIFI_STATUS_FILE):
+            return "WiFi: manager not running", ORANGE
+
+        with open(WIFI_STATUS_FILE, "r") as f:
+            data = json.load(f)
+
+        status = data.get("status", "unknown")
+        ssid = data.get("ssid") or data.get("target_ssid") or WIFI_SSID
+
+        if status == "connected":
+            return f"WiFi: Connected ({ssid})", GREEN
+        if status == "connecting":
+            return f"WiFi: Connecting to {ssid}...", ORANGE
+        if status == "no_adapter":
+            return "WiFi: no adapter", RED
+        if status == "disconnected":
+            return f"WiFi: Not connected ({ssid})", RED
+        if status == "error":
+            msg = data.get("message", "error")
+            return f"WiFi: error ({msg})", RED
+
+        return "WiFi: unknown", ORANGE
+    except Exception:
+        return "WiFi: status unavailable", ORANGE
 
 def draw_wrapped_text(text, x, y, max_width, text_font, color=WHITE, line_spacing=8):
     words = text.split(" ") if text else [""]
@@ -241,155 +285,6 @@ def camera_screen():
 
         pygame.display.flip()
         clock.tick(30)
-
-# ---------------------------------------------------
-# WIFI
-# ---------------------------------------------------
-
-def get_wifi_interface():
-    net_path = "/sys/class/net"
-    if not os.path.exists(net_path):
-        return None
-    for iface in os.listdir(net_path):
-        if os.path.exists(os.path.join(net_path, iface, "wireless")):
-            return iface
-    return None
-
-
-def connect_wifi_wpa(interface, ssid, password):
-    try:
-        config_path = "/tmp/wpa_supplicant.conf"
-        with open(config_path, "w") as f:
-            subprocess.run(["wpa_passphrase", ssid, password], stdout=f, check=True)
-        subprocess.run(["pkill", "-f", f"wpa_supplicant.*{interface}"], check=False)
-        subprocess.run(["wpa_supplicant", "-B", "-i", interface, "-c", config_path], check=True)
-        subprocess.run(["dhclient", interface], check=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        print("Connection failed:", e)
-        return False
-
-
-def disconnect_wifi(interface):
-    try:
-        subprocess.run(["dhclient", "-r", interface], check=False)
-        subprocess.run(["pkill", "-f", f"wpa_supplicant.*{interface}"], check=False)
-        return True
-    except Exception as e:
-        print("Disconnect failed:", e)
-        return False
-
-
-def get_wifi_info_wpa(interface, target_ssid):
-    try:
-        ip_result = subprocess.run(
-            ["ip", "-4", "addr", "show", interface], capture_output=True, text=True
-        )
-        ip = None
-        for line in ip_result.stdout.splitlines():
-            if line.strip().startswith("inet "):
-                ip = line.split()[1].split("/")[0]
-                break
-
-        ssid_result = subprocess.run(["iwgetid", "-r"], capture_output=True, text=True)
-        ssid = ssid_result.stdout.strip()
-
-        signal_result = subprocess.run(["iwconfig", interface], capture_output=True, text=True)
-        signal = None
-        for line in signal_result.stdout.splitlines():
-            if "Signal level" in line:
-                signal = line.strip()
-                break
-
-        connected = bool(ip and ssid == target_ssid)
-        return connected, ssid if connected else None, signal, ip
-
-    except Exception as e:
-        print("WiFi check failed:", e)
-        return False, None, None, None
-
-
-def wifi_screen():
-    status_text = "Checking WiFi..."
-    color       = ORANGE
-
-    interface = None
-    connected = False
-    ssid = signal = ip = None
-
-    wifi_check_interval = 1.0
-    last_wifi_check     = 0
-
-    while True:
-        current_time = time.time()
-
-        exit_btn       = draw_exit_button()
-        prev_btn       = Button("Previous",   (40, HEIGHT - 70, 180, 50))
-        next_btn       = Button("Continue",   (WIDTH - 240, HEIGHT - 70, 180, 50))
-        connect_btn    = Button("Connect",    (WIDTH // 2 - 220, HEIGHT // 2 + 140, 180, 50), BLUE)
-        disconnect_btn = Button("Disconnect", (WIDTH // 2 + 40,  HEIGHT // 2 + 140, 180, 50), RED)
-
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT: quit_program()
-
-            nav = handle_keyboard_navigation(event)
-            if nav == "exit":   quit_program()
-            elif nav == "back": return "back"
-            elif nav == "next": return "next"
-
-            if event.type == pygame.MOUSEBUTTONDOWN:
-                pos = pygame.mouse.get_pos()
-                if exit_btn.rect.collidepoint(pos):    quit_program()
-                if prev_btn.rect.collidepoint(pos):    return "back"
-                if next_btn.rect.collidepoint(pos):    return "next"
-                if not connected and connect_btn.rect.collidepoint(pos):
-                    if interface:
-                        status_text = "Connecting..."
-                        color = ORANGE
-                        connect_wifi_wpa(interface, WIFI_SSID, WIFI_PASSWORD)
-                if connected and disconnect_btn.rect.collidepoint(pos):
-                    if interface:
-                        disconnect_wifi(interface)
-
-        screen.fill(BLACK)
-
-        title = font_large.render("WiFi Check", True, WHITE)
-        screen.blit(title, (40, 30))
-
-        status_surf = font_large.render(status_text, True, color)
-        screen.blit(status_surf, (WIDTH // 2 - status_surf.get_width() // 2, HEIGHT // 2 - 80))
-
-        if connected:
-            y = HEIGHT // 2
-            for line in [f"SSID: {ssid}", f"Signal: {signal or 'N/A'}", f"IP: {ip or 'No IP'}"]:
-                t = font.render(line, True, WHITE)
-                screen.blit(t, (WIDTH // 2 - t.get_width() // 2, y))
-                y += 40
-
-        (connect_btn if not connected else disconnect_btn).draw()
-        prev_btn.draw()
-        next_btn.draw()
-
-        pygame.display.flip()
-        clock.tick(30)
-
-        if current_time - last_wifi_check > wifi_check_interval:
-            last_wifi_check = current_time
-            interface = get_wifi_interface()
-
-            if not interface:
-                status_text = "No WiFi Adapter Detected"
-                color = RED
-                connected = False
-                continue
-
-            connected, ssid, signal, ip = get_wifi_info_wpa(interface, WIFI_SSID)
-            if connected:
-                status_text = f"Connected to {ssid}"
-                color = GREEN
-            else:
-                status_text = "Not Connected"
-                color = RED
 
 # ---------------------------------------------------
 # SPEAKER
@@ -785,6 +680,11 @@ def final_screen():
     cursor_visible = True
     cursor_timer   = time.time()
 
+    wifi_status_text = "WiFi: manager not running"
+    wifi_status_color = ORANGE
+    wifi_status_refresh_interval = 1.0
+    last_wifi_status_refresh = 0.0
+
     def submit_sync(selected_grade):
         nonlocal sync_status, sync_color
         try:
@@ -955,11 +855,18 @@ def final_screen():
                 sync_status = f"Could not reach {last_ip}:{SERVER_PORT}"
                 sync_color  = RED
 
+        if now - last_wifi_status_refresh >= wifi_status_refresh_interval:
+            last_wifi_status_refresh = now
+            wifi_status_text, wifi_status_color = read_wifi_status_label()
+
         title = font_large.render("Finished", True, WHITE)
         screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 120))
 
         ip_label = font_small.render(f"Server: {last_ip}:{SERVER_PORT}", True, LIGHT_GRAY)
         screen.blit(ip_label, (WIDTH // 2 - ip_label.get_width() // 2, 180))
+
+        wifi_label = font_small.render(wifi_status_text, True, wifi_status_color)
+        screen.blit(wifi_label, (WIDTH - wifi_label.get_width() - 30, 30))
 
         if time.time() - cursor_timer > 0.5:
             cursor_visible = not cursor_visible
