@@ -58,6 +58,8 @@ if os.path.isdir(PUPPY_HOME):
 else:
     CONFIG_FILE = os.path.join(os.path.dirname(__file__), "ip_config.txt")
 SERVER_PORT = 5050
+WIFI_SSID = "Engineering"
+WIFI_PASSWORD = "Csad!123"
 
 # ---------------------------------------------------
 # IP CONFIG
@@ -308,10 +310,6 @@ def get_wifi_info_wpa(interface, target_ssid):
 
 
 def wifi_screen():
-    # Ask for SSID and password each session, defaulting to the hardcoded values
-    WIFI_SSID     = "Engineering"
-    WIFI_PASSWORD = "Csad!123"
-
     status_text = "Checking WiFi..."
     color       = ORANGE
 
@@ -820,6 +818,7 @@ def final_screen():
 
     while True:
         screen.fill(BLACK)
+        now = time.time()
 
         exit_btn  = draw_exit_button()
         prev_btn  = Button("Previous",  (40, HEIGHT - 70, 180, 50))
@@ -1027,21 +1026,17 @@ while True:
         current = 1 if r == "next" else 0
 
     elif current == 1:
-        r = wifi_screen()
+        r = speaker_screen()
         current = 0 if r == "back" else 2
 
     elif current == 2:
-        r = speaker_screen()
+        r = keyboard_screen()
         current = 1 if r == "back" else 3
 
     elif current == 3:
-        r = keyboard_screen()
+        r = battery_screen()
         current = 2 if r == "back" else 4
 
     elif current == 4:
-        r = battery_screen()
-        current = 3 if r == "back" else 5
-
-    elif current == 5:
         r = final_screen()
-        current = 4
+        current = 3
