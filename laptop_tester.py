@@ -845,25 +845,7 @@ def final_screen():
 
         if now - last_wifi_check >= wifi_check_interval:
             last_wifi_check = now
-            interface = get_wifi_interface()
-
-            if not interface:
-                wifi_status_text = "WiFi: no adapter"
-                wifi_status_color = RED
-            else:
-                connected, ssid, _, _ = get_wifi_info_wpa(interface, WIFI_SSID)
-                if connected:
-                    wifi_status_text = f"WiFi: Connected ({ssid})"
-                    wifi_status_color = GREEN
-                else:
-                    wifi_status_text = f"WiFi: Not connected ({WIFI_SSID})"
-                    wifi_status_color = RED
-
-                    if now - last_wifi_connect_attempt >= wifi_connect_retry_interval:
-                        last_wifi_connect_attempt = now
-                        wifi_status_text = f"WiFi: Connecting to {WIFI_SSID}..."
-                        wifi_status_color = ORANGE
-                        connect_wifi_wpa(interface, WIFI_SSID, WIFI_PASSWORD)
+            wifi_status_text, wifi_status_color = read_wifi_status_label()
 
         title = font_large.render("Finished", True, WHITE)
         screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 120))
