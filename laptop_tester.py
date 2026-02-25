@@ -785,6 +785,13 @@ def final_screen():
     cursor_visible = True
     cursor_timer   = time.time()
 
+    wifi_status_text = "WiFi: checking..."
+    wifi_status_color = ORANGE
+    wifi_check_interval = 3.0
+    wifi_connect_retry_interval = 10.0
+    last_wifi_check = 0.0
+    last_wifi_connect_attempt = 0.0
+
     def submit_sync(selected_grade):
         nonlocal sync_status, sync_color
         try:
@@ -955,11 +962,36 @@ def final_screen():
                 sync_status = f"Could not reach {last_ip}:{SERVER_PORT}"
                 sync_color  = RED
 
+        if now - last_wifi_check >= wifi_check_interval:
+            last_wifi_check = now
+            interface = get_wifi_interface()
+
+            if not interface:
+                wifi_status_text = "WiFi: no adapter"
+                wifi_status_color = RED
+            else:
+                connected, ssid, _, _ = get_wifi_info_wpa(interface, WIFI_SSID)
+                if connected:
+                    wifi_status_text = f"WiFi: Connected ({ssid})"
+                    wifi_status_color = GREEN
+                else:
+                    wifi_status_text = f"WiFi: Not connected ({WIFI_SSID})"
+                    wifi_status_color = RED
+
+                    if now - last_wifi_connect_attempt >= wifi_connect_retry_interval:
+                        last_wifi_connect_attempt = now
+                        wifi_status_text = f"WiFi: Connecting to {WIFI_SSID}..."
+                        wifi_status_color = ORANGE
+                        connect_wifi_wpa(interface, WIFI_SSID, WIFI_PASSWORD)
+
         title = font_large.render("Finished", True, WHITE)
         screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 120))
 
         ip_label = font_small.render(f"Server: {last_ip}:{SERVER_PORT}", True, LIGHT_GRAY)
         screen.blit(ip_label, (WIDTH // 2 - ip_label.get_width() // 2, 180))
+
+        wifi_label = font_small.render(wifi_status_text, True, wifi_status_color)
+        screen.blit(wifi_label, (WIDTH - wifi_label.get_width() - 30, 30))
 
         if time.time() - cursor_timer > 0.5:
             cursor_visible = not cursor_visible
