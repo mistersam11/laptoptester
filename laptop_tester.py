@@ -84,8 +84,6 @@ def save_ip(ip_address):
         print("Could not save IP:", e)
 
 
-
-
 def read_wifi_status_label():
     """Read WiFi status produced by wifi_manager.py and return (text, color)."""
     try:
@@ -473,6 +471,23 @@ def get_system_info():
     manufacturer = read_dmi("sys_vendor")
     model        = read_dmi("product_name")
     serial       = read_dmi("product_serial")
+
+    # -------------------------------------------------------
+    # Lenovo fix: product_name is an internal part number
+    # (e.g. "20NY"). product_version holds the human-readable
+    # name (e.g. "ThinkPad 11e Yoga Gen 6"), which is what
+    # the template spreadsheet uses.
+    # -------------------------------------------------------
+    if "lenovo" in manufacturer.lower():
+        version = read_dmi("product_version")
+        # Only substitute if version looks like a real model name
+        # (i.e. not empty, "None", "Unavailable", or another bare number string)
+        if (
+            version
+            and version.lower() not in {"unavailable", "none", "n/a", ""}
+            and not re.fullmatch(r"[\d\s]+", version)   # skip pure-number strings
+        ):
+            model = version
 
     if manufacturer and model.lower().startswith(manufacturer.lower()):
         model = model[len(manufacturer):].strip()
