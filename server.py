@@ -88,7 +88,7 @@ def parse_cpu_info(cpu_string):
         cpu_make_full = "AMD"
 
     number_match     = re.search(
-        r"(i[3579]-\d+\w*|[NJM]\d{2,5}|M\d+|[0-9]+[UHG]|Ryzen\s?\d+\s?\d+\w*)",
+        r"(i[3579]-\d+\w*|[NM]\d{4}|M\d+|[0-9]+[UHG]|Ryzen\s?\d+\s?\d+\w*)",
         cpu_string,
         re.IGNORECASE,
     )
@@ -193,14 +193,7 @@ def append_to_log(data):
     condition      = str(data.get("condition", "")).strip()
     condition_grade = str(data.get("condition_grade", "A-Grade (Like-New)")).strip()
 
-    battery_health_lower = battery_health.lower()
-    battery_unknown = (
-        battery_health_lower in {"", "none", "n/a"}
-        or "unknown" in battery_health_lower
-        or "unavailable" in battery_health_lower
-    )
-
-    if battery_unknown:
+    if battery_health.lower() in {"", "unknown", "unavailable", "none", "n/a"}:
         battery_prefix = "Battery dead."
     else:
         battery_prefix = f"Battery Health: {battery_health}."
