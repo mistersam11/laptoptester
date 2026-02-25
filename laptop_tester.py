@@ -86,20 +86,6 @@ def save_ip(ip_address):
 
 
 
-
-
-def get_wifi_interface():
-    """Compatibility helper for legacy calls; WiFi management lives in wifi_manager.py."""
-    net_path = "/sys/class/net"
-    if not os.path.exists(net_path):
-        return None
-
-    for iface in os.listdir(net_path):
-        if os.path.exists(os.path.join(net_path, iface, "wireless")):
-            return iface
-    return None
-
-
 def read_wifi_status_label():
     """Read WiFi status produced by wifi_manager.py and return (text, color)."""
     try:
@@ -680,10 +666,12 @@ def final_screen():
     cursor_visible = True
     cursor_timer   = time.time()
 
-    wifi_status_text = "WiFi: manager not running"
+    wifi_status_text = "WiFi: checking..."
     wifi_status_color = ORANGE
-    wifi_status_refresh_interval = 1.0
-    last_wifi_status_refresh = 0.0
+    wifi_check_interval = 3.0
+    wifi_connect_retry_interval = 10.0
+    last_wifi_check = 0.0
+    last_wifi_connect_attempt = 0.0
 
     def submit_sync(selected_grade):
         nonlocal sync_status, sync_color
@@ -855,9 +843,27 @@ def final_screen():
                 sync_status = f"Could not reach {last_ip}:{SERVER_PORT}"
                 sync_color  = RED
 
-        if now - last_wifi_status_refresh >= wifi_status_refresh_interval:
-            last_wifi_status_refresh = now
-            wifi_status_text, wifi_status_color = read_wifi_status_label()
+        if now - last_wifi_check >= wifi_check_interval:
+            last_wifi_check = now
+            interface = get_wifi_interface()
+
+            if not interface:
+                wifi_status_text = "WiFi: no adapter"
+                wifi_status_color = RED
+            else:
+                connected, ssid, _, _ = get_wifi_info_wpa(interface, WIFI_SSID)
+                if connected:
+                    wifi_status_text = f"WiFi: Connected ({ssid})"
+                    wifi_status_color = GREEN
+                else:
+                    wifi_status_text = f"WiFi: Not connected ({WIFI_SSID})"
+                    wifi_status_color = RED
+
+                    if now - last_wifi_connect_attempt >= wifi_connect_retry_interval:
+                        last_wifi_connect_attempt = now
+                        wifi_status_text = f"WiFi: Connecting to {WIFI_SSID}..."
+                        wifi_status_color = ORANGE
+                        connect_wifi_wpa(interface, WIFI_SSID, WIFI_PASSWORD)
 
         title = font_large.render("Finished", True, WHITE)
         screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 120))
