@@ -22,6 +22,7 @@ from pathlib import Path
 
 from flask import Flask, request, jsonify
 from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Alignment
 
 # ---------------------------------------------------
 # PATHS
@@ -86,7 +87,11 @@ def parse_cpu_info(cpu_string):
     elif "AMD" in cpu_string:
         cpu_make_full = "AMD"
 
-    number_match     = re.search(r"(i[3579]-\d+\w*|M\d+|[0-9]+U|Ryzen\s?\d+\s?\d+\w*)", cpu_string)
+    number_match     = re.search(
+        r"(i[3579]-\d+\w*|[NJM]\d{2,5}|M\d+|[0-9]+[UHG]|Ryzen\s?\d+\s?\d+\w*)",
+        cpu_string,
+        re.IGNORECASE,
+    )
     cpu_model_number = number_match.group(0) if number_match else "Unknown"
     cpu_model_number = re.sub(r"^(i[3579]-|Ryzen\s?\d\s?)", "", cpu_model_number).strip()
 
@@ -184,9 +189,23 @@ def append_to_log(data):
     now      = datetime.now()
     date_str = f"{now.month}/{now.day:02d}/{now.year}"
 
-    battery_health = data.get("battery_health", "")
-    condition      = data.get("condition", "")
-    battery_text   = f"Battery Health: {battery_health}. {condition}"
+    battery_health = str(data.get("battery_health", "")).strip()
+    condition      = str(data.get("condition", "")).strip()
+    condition_grade = str(data.get("condition_grade", "A-Grade (Like-New)")).strip()
+
+    battery_health_lower = battery_health.lower()
+    battery_unknown = (
+        battery_health_lower in {"", "none", "n/a"}
+        or "unknown" in battery_health_lower
+        or "unavailable" in battery_health_lower
+    )
+
+    if battery_unknown:
+        battery_prefix = "Battery dead."
+    else:
+        battery_prefix = f"Battery Health: {battery_health}."
+
+    battery_text = f"{battery_prefix} {condition}".strip()
 
     csad_value = data.get("csad_value", "").strip()
 
@@ -195,6 +214,7 @@ def append_to_log(data):
     new_row[1]  = date_str                            # B
     new_row[7]  = data.get("serial", "")             # H
     new_row[10] = battery_text                        # K
+    new_row[11] = condition_grade                     # L
     new_row[18] = cpu_model_clean                     # S
     new_row[27] = ram_config                          # AB
     new_row[28] = total_ram_clean                     # AC
@@ -203,6 +223,11 @@ def append_to_log(data):
     new_row[41] = cpu_make_clean                      # AP
 
     daily_ws.append(new_row)
+
+    # Ensure long condition notes in column K wrap instead of overflowing.
+    row_idx = daily_ws.max_row
+    daily_ws.cell(row=row_idx, column=11).alignment = Alignment(wrap_text=True)
+
     daily_wb.save(DAILY_FILE)
 
 # ---------------------------------------------------
