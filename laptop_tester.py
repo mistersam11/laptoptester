@@ -657,14 +657,17 @@ def battery_screen():
 def final_screen():
     last_ip = load_saved_ip()
 
-    server_status = "idle"   # idle | checking | ok | error
-    sync_status   = ""
-    sync_color    = WHITE
+    sync_status = ""
+    sync_color  = WHITE
 
-    entering_ip        = False
-    entering_csad      = False
-    entering_condition = False
-    entering_grade     = False
+    # Sync wizard stages:
+    # None          → idle
+    # "ip"          → entering IP
+    # "connecting"  → pinging server (processed in next frame)
+    # "csad"        → entering CSAD
+    # "condition"   → entering condition notes
+    # "grade"       → selecting grade
+    sync_stage = None
 
     ip_input        = last_ip
     csad_input      = ""
@@ -681,12 +684,10 @@ def final_screen():
     cursor_visible = True
     cursor_timer   = time.time()
 
-    wifi_status_text = "WiFi: checking..."
+    wifi_status_text  = "WiFi: checking..."
     wifi_status_color = ORANGE
     wifi_check_interval = 3.0
-    wifi_connect_retry_interval = 10.0
     last_wifi_check = 0.0
-    last_wifi_connect_attempt = 0.0
 
     def submit_sync(selected_grade):
         nonlocal sync_status, sync_color
@@ -726,27 +727,13 @@ def final_screen():
         exit_btn  = draw_exit_button()
         prev_btn  = Button("Previous",  (40, HEIGHT - 70, 180, 50))
         power_btn = Button("Power Off", (WIDTH - 240, HEIGHT - 70, 180, 50))
-
-        if server_status == "idle":
-            connect_btn = Button("Connect to PC", (WIDTH // 2 - 260, HEIGHT - 70, 220, 50), BLUE)
-        elif server_status == "checking":
-            connect_btn = Button("Checking...",   (WIDTH // 2 - 260, HEIGHT - 70, 220, 50), ORANGE)
-        elif server_status == "ok":
-            connect_btn = Button("Connected ✓",   (WIDTH // 2 - 260, HEIGHT - 70, 220, 50), GREEN)
-        else:
-            connect_btn = Button("Retry Connect", (WIDTH // 2 - 260, HEIGHT - 70, 220, 50), RED)
-
-        sync_btn = Button(
-            "Sync to Log",
-            (WIDTH // 2 + 40, HEIGHT - 70, 220, 50),
-            GREEN if server_status == "ok" else LIGHT_GRAY
-        )
+        sync_btn  = Button("Sync to Log", (WIDTH // 2 - 110, HEIGHT - 70, 220, 50), BLUE)
 
         grade_buttons = []
-        if entering_grade:
+        if sync_stage == "grade":
             popup = pygame.Rect(WIDTH // 2 - 380, HEIGHT // 2 - 140, 760, 280)
             for i, (key, label) in enumerate(grade_map.items()):
-                btn = Button(f"{key}: {label}", (popup.x + 20, popup.y + 95 + i * 42, popup.width - 40, 36), BLUE)
+                btn = Button(label, (popup.x + 20, popup.y + 95 + i * 42, popup.width - 40, 36), BLUE)
                 grade_buttons.append((key, label, btn))
 
         for event in pygame.event.get():
@@ -764,36 +751,41 @@ def final_screen():
             if prev_btn.clicked(event):
                 return "back"
             if power_btn.clicked(event):
-                pending_ip = ip_input.strip() if entering_ip else last_ip.strip()
+                pending_ip = ip_input.strip() if sync_stage == "ip" else last_ip.strip()
                 if pending_ip:
                     save_ip(pending_ip)
                 subprocess.call(["sync"])
                 subprocess.call(["busybox", "poweroff", "-f"])
 
-            if connect_btn.clicked(event):
-                entering_ip   = True
-                ip_input      = last_ip
-                server_status = "idle"
+            # Sync button starts the wizard at the IP entry stage
+            if sync_btn.clicked(event) and sync_stage is None:
+                sync_stage = "ip"
+                ip_input   = last_ip
+                sync_status = ""
 
-            if sync_btn.clicked(event):
-                if server_status != "ok":
-                    sync_status = "Connect to PC first"
-                    sync_color  = RED
-                else:
-                    entering_csad   = True
-                    csad_input      = ""
-                    condition_input = ""
-                    condition_grade = "A-Grade (Like-New)"
-
-            if entering_csad and event.type == pygame.KEYDOWN:
+            # --- IP entry ---
+            if sync_stage == "ip" and event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    entering_csad = False
+                    sync_stage  = None
+                elif event.key == pygame.K_RETURN:
+                    last_ip    = ip_input.strip()
+                    save_ip(last_ip)
+                    sync_stage = "connecting"
+                elif event.key == pygame.K_BACKSPACE:
+                    ip_input = ip_input[:-1]
+                else:
+                    ip_input += event.unicode
+
+            # --- CSAD entry ---
+            elif sync_stage == "csad" and event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    sync_stage  = None
+                    sync_status = ""
                 elif event.key == pygame.K_RETURN:
                     val = csad_input.strip()
                     if val == "" or re.fullmatch(r"\d{5}[A-Za-z]", val):
-                        csad_input         = val.upper()
-                        entering_csad      = False
-                        entering_condition = True
+                        csad_input = val.upper()
+                        sync_stage = "condition"
                     else:
                         sync_status = "CSAD: 5 digits + letter, or leave empty"
                         sync_color  = RED
@@ -802,66 +794,63 @@ def final_screen():
                 else:
                     csad_input += event.unicode
 
-            elif entering_condition and event.type == pygame.KEYDOWN:
+            # --- Condition entry ---
+            elif sync_stage == "condition" and event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    entering_condition = False
+                    sync_stage  = None
+                    sync_status = ""
                 elif event.key == pygame.K_RETURN:
-                    entering_condition = False
-                    entering_grade = True
+                    sync_stage = "grade"
                 elif event.key == pygame.K_BACKSPACE:
                     condition_input = condition_input[:-1]
                 else:
                     condition_input += event.unicode
 
-            elif entering_grade:
+            # --- Grade selection ---
+            elif sync_stage == "grade":
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
-                        entering_grade = False
+                        sync_stage  = None
+                        sync_status = ""
                     elif event.key == pygame.K_RETURN:
-                        entering_grade = False
+                        sync_stage = None
                         submit_sync(condition_grade)
                     else:
                         selected = event.unicode.upper()
                         if selected in grade_map:
                             condition_grade = grade_map[selected]
-                            entering_grade = False
+                            sync_stage = None
                             submit_sync(condition_grade)
 
                 if event.type == pygame.MOUSEBUTTONDOWN:
                     for key, label, btn in grade_buttons:
                         if btn.clicked(event):
                             condition_grade = label
-                            entering_grade = False
+                            sync_stage = None
                             submit_sync(condition_grade)
                             break
 
-            if entering_ip and event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    entering_ip = False
-                elif event.key == pygame.K_RETURN:
-                    last_ip = ip_input.strip()
-                    save_ip(last_ip)
-                    entering_ip = False
-                    server_status = "checking"
-                elif event.key == pygame.K_BACKSPACE:
-                    ip_input = ip_input[:-1]
-                else:
-                    ip_input += event.unicode
-
-        if server_status == "checking":
+        # --- Connection check (handled outside event loop to avoid blocking) ---
+        if sync_stage == "connecting":
             reachable = ping_server(last_ip)
-            server_status = "ok" if reachable else "error"
             if reachable:
-                sync_status = f"Connected to {last_ip}"
-                sync_color  = GREEN
+                # Silently move on to CSAD
+                sync_stage      = "csad"
+                csad_input      = ""
+                condition_input = ""
+                condition_grade = "A-Grade (Like-New)"
+                sync_status     = ""
             else:
-                sync_status = f"Could not reach {last_ip}:{SERVER_PORT}"
+                sync_stage  = None
+                sync_status = f"Failed to connect to {last_ip}:{SERVER_PORT}"
                 sync_color  = RED
 
+        # --- WiFi status refresh ---
         if now - last_wifi_check >= wifi_check_interval:
             last_wifi_check = now
             wifi_status_text, wifi_status_color = read_wifi_status_label()
 
+        # --- Draw UI ---
         title = font_large.render("Finished", True, WHITE)
         screen.blit(title, (WIDTH // 2 - title.get_width() // 2, 120))
 
@@ -876,20 +865,30 @@ def final_screen():
             cursor_timer   = time.time()
         cursor_char = "|" if cursor_visible else ""
 
-        if entering_ip:
+        # --- Popups ---
+        if sync_stage == "ip":
             popup = pygame.Rect(WIDTH // 2 - 300, HEIGHT // 2 - 80, 600, 160)
             pygame.draw.rect(screen, GRAY, popup, border_radius=10)
             screen.blit(font.render("Enter PC IP Address (ESC to cancel)", True, WHITE), (popup.x + 20, popup.y + 20))
             screen.blit(font_large.render(ip_input + cursor_char, True, LIGHT_GREEN), (popup.x + 20, popup.y + 70))
 
-        elif entering_csad:
+        elif sync_stage == "connecting":
+            popup = pygame.Rect(WIDTH // 2 - 200, HEIGHT // 2 - 50, 400, 100)
+            pygame.draw.rect(screen, GRAY, popup, border_radius=10)
+            connecting_text = font.render(f"Connecting to {last_ip}...", True, ORANGE)
+            screen.blit(connecting_text, (
+                popup.centerx - connecting_text.get_width() // 2,
+                popup.centery - connecting_text.get_height() // 2
+            ))
+
+        elif sync_stage == "csad":
             popup = pygame.Rect(WIDTH // 2 - 300, HEIGHT // 2 - 100, 600, 200)
             pygame.draw.rect(screen, GRAY, popup, border_radius=10)
             screen.blit(font.render("Enter CSAD (5 digits + letter) or leave empty", True, WHITE), (popup.x + 20, popup.y + 20))
             screen.blit(font_small.render(f"{len(csad_input)}/6", True, LIGHT_GRAY), (popup.right - 80, popup.y + 20))
             screen.blit(font_large.render(csad_input + cursor_char, True, LIGHT_GREEN), (popup.x + 20, popup.y + 100))
 
-        elif entering_condition:
+        elif sync_stage == "condition":
             popup = pygame.Rect(WIDTH // 2 - 350, HEIGHT // 2 - 120, 700, 240)
             pygame.draw.rect(screen, GRAY, popup, border_radius=10)
             screen.blit(font.render("Enter Condition → press Enter for grade", True, WHITE), (popup.x + 20, popup.y + 20))
@@ -903,7 +902,7 @@ def final_screen():
                 line_spacing=4,
             )
 
-        elif entering_grade:
+        elif sync_stage == "grade":
             popup = pygame.Rect(WIDTH // 2 - 380, HEIGHT // 2 - 140, 760, 280)
             pygame.draw.rect(screen, GRAY, popup, border_radius=10)
             screen.blit(font.render("Enter condition grade (or press Enter to default)", True, WHITE), (popup.x + 20, popup.y + 20))
@@ -917,7 +916,6 @@ def final_screen():
 
         prev_btn.draw()
         power_btn.draw()
-        connect_btn.draw()
         sync_btn.draw()
         exit_btn.draw()
 
