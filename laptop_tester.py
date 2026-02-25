@@ -754,8 +754,20 @@ def final_screen():
                 pending_ip = ip_input.strip() if sync_stage == "ip" else last_ip.strip()
                 if pending_ip:
                     save_ip(pending_ip)
+                # Flush filesystem buffers
                 subprocess.call(["sync"])
-                subprocess.call(["busybox", "poweroff", "-f"])
+                subprocess.call(["sync"])
+                # Force immediate power-off via kernel SysRq,
+                # completely bypassing PuppyLinux's save-to-RAM dialog
+                # and all other shutdown scripts.
+                try:
+                    with open("/proc/sys/kernel/sysrq", "w") as f:
+                        f.write("1")
+                    with open("/proc/sysrq-trigger", "w") as f:
+                        f.write("o")
+                except Exception:
+                    # Fallback if sysrq write fails (shouldn't happen as root)
+                    subprocess.call(["poweroff", "-f"])
 
             # Sync button starts the wizard at the IP entry stage
             if sync_btn.clicked(event) and sync_stage is None:
