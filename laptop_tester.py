@@ -547,7 +547,7 @@ def get_battery_info():
 
     try:
         base_path = "/sys/class/power_supply"
-        bat_dirs  = [d for d in os.listdir(base_path) if d.startswith("BAT")]
+        bat_dirs  = sorted([d for d in os.listdir(base_path) if d.startswith("BAT")])
         if not bat_dirs:
             return percent, health, cycles
 
@@ -566,7 +566,7 @@ def get_battery_info():
         if full and design:
             full, design = float(full), float(design)
             if design > 0:
-                health = f"{round((full / design) * 100)}%"
+                health = f"{min(round((full / design) * 100), 100)}%"
 
         cycle = read_value("cycle_count")
         if cycle:
