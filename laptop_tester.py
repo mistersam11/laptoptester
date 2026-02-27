@@ -473,24 +473,41 @@ def get_system_info():
     serial       = read_dmi("product_serial")
 
     # -------------------------------------------------------
-    # Lenovo fix: product_name is an internal part number
-    # (e.g. "20NY"). product_version holds the human-readable
-    # name (e.g. "ThinkPad 11e Yoga Gen 6"), which is what
-    # the template spreadsheet uses.
+    # Lenovo fix: product_name is sometimes an internal part number
+    # (e.g. "20NY"). product_version may hold the human-readable
+    # name (e.g. "ThinkPad 11e Yoga Gen 6").
     # -------------------------------------------------------
-    if "lenovo" in manufacturer.lower():
+    if manufacturer and "lenovo" in manufacturer.lower():
         version = read_dmi("product_version")
-        # Only substitute if version looks like a real model name
-        # (i.e. not empty, "None", "Unavailable", or another bare number string)
         if (
             version
             and version.lower() not in {"unavailable", "none", "n/a", ""}
-            and not re.fullmatch(r"[\d\s]+", version)   # skip pure-number strings
+            and not re.fullmatch(r"[\d\s]+", version)  # skip pure-number strings
         ):
             model = version
 
-    if manufacturer and model.lower().startswith(manufacturer.lower()):
-        model = model[len(manufacturer):].strip()
+    # -------------------------------------------------------
+    # HP normalization:
+    # sys_vendor often reports "Hewlett-Packard". Your template uses "HP".
+    # product_name often includes "HP " prefix (e.g. "HP EliteBook 840 G1").
+    # -------------------------------------------------------
+    if manufacturer:
+        mfg = manufacturer.strip()
+        if re.fullmatch(r"(?i)hewlett[- ]packard|hp", mfg):
+            manufacturer = "HP"
+
+    if model:
+        # Strip leading "HP " or "Hewlett-Packard " from model
+        model = re.sub(r"(?i)^(?:hewlett[- ]packard|hp)\s+", "", model).strip()
+
+    # -------------------------------------------------------
+    # Generic cleanup: if model starts with manufacturer, remove it.
+    # (helps some vendors that embed the make in product_name)
+    # -------------------------------------------------------
+    if manufacturer and model:
+        # Require a space after manufacturer to avoid accidental partial matches
+        if model.lower().startswith(manufacturer.lower() + " "):
+            model = model[len(manufacturer):].strip()
 
     return manufacturer, model, serial
 
