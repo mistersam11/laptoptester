@@ -509,6 +509,15 @@ def get_system_info():
         if model.lower().startswith(manufacturer.lower() + " "):
             model = model[len(manufacturer):].strip()
 
+    # Strip trailing generic suffixes like "Notebook PC", "Laptop", etc.
+    if model:
+        model = re.sub(
+            r"\s+(?:Notebook\s+PC|Notebook|Laptop|PC)\s*$",
+            "",
+            model,
+            flags=re.IGNORECASE,
+        ).strip()
+
     return manufacturer, model, serial
 
 
