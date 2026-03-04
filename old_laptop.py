@@ -1,34 +1,64 @@
 #!/usr/bin/env python3
 """
-Laptop Hardware Tester – tkinter version
+Laptop Hardware Tester – tkinter version (stability-hardened)
 Designed for compatibility with older hardware (Intel Core 2 era+)
 
-Dependencies:
-  pip install opencv-python pillow numpy psutil sounddevice
-  (sounddevice is optional – falls back to aplay if missing)
-  (pillow is optional – camera shows text notice if missing)
+Key stability changes vs your original:
+- Fix duplicate fullscreen watchdog (only one, no overrideredirect loop)
+- Optional imports for cv2/numpy/psutil/Pillow/sounddevice so missing deps don't crash the app
+- More robust camera handling (tries /dev/video0..3, lower default res, backoff retry, avoids hammering)
+- Bind/unbind keyboard handlers per-screen (less global input weirdness)
+- Skip dmidecode unless root (avoids slow/failure paths)
+- Sync button lockout during sync + small retry/backoff
+- Safer poweroff flow (normal first, then sysrq, then forced)
+- Global crash catcher writes a log (especially useful on live USB)
+
+Dependencies (recommended via apt on antiX/Debian-based):
+  sudo apt install python3 python3-tk python3-psutil python3-numpy python3-opencv python3-pil python3-pil.imagetk \
+                   alsa-utils v4l-utils dmidecode
+Optional:
+  sudo apt install python3-sounddevice
 """
 
-import os, re, sys, time, json, threading, subprocess
+import os, re, sys, time, json, threading, subprocess, traceback, socket
 import urllib.request, urllib.error
 import tkinter as tk
 from tkinter import font as tkfont
 
-import cv2
-import numpy as np
-import psutil
+# --- Optional imports (don't crash if missing) ---
+CV_AVAILABLE = True
+NP_AVAILABLE = True
+PSUTIL_AVAILABLE = True
+PIL_AVAILABLE = False
+SD_AVAILABLE = False
+
+try:
+    import cv2
+except Exception:
+    CV_AVAILABLE = False
+
+try:
+    import numpy as np
+except Exception:
+    NP_AVAILABLE = False
+
+try:
+    import psutil
+except Exception:
+    PSUTIL_AVAILABLE = False
 
 try:
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
-except ImportError:
+except Exception:
     PIL_AVAILABLE = False
 
 try:
     import sounddevice as sd
     SD_AVAILABLE = True
-except ImportError:
+except Exception:
     SD_AVAILABLE = False
+
 
 # ─── Colours ──────────────────────────────────────────────────────────────────
 BG         = "#141414"
@@ -49,6 +79,16 @@ CONFIG_FILE      = (os.path.join(PUPPY_HOME, "laptoptester_ip_config.txt")
                     else os.path.join(os.path.dirname(__file__), "ip_config.txt"))
 SERVER_PORT      = 5050
 WIFI_STATUS_FILE = "/tmp/laptoptester_wifi_status.json"
+
+# Crash log path (prefer /mnt/home on live USB if present)
+CRASH_LOG = (os.path.join(PUPPY_HOME, "laptoptester_crash.log")
+             if os.path.isdir(PUPPY_HOME) else os.path.join(os.path.dirname(__file__), "laptoptester_crash.log"))
+
+# Reasonable global socket default timeout to avoid weird hangs
+try:
+    socket.setdefaulttimeout(6)
+except Exception:
+    pass
 
 
 # ─── Server / IP helpers ──────────────────────────────────────────────────────
@@ -87,15 +127,15 @@ def post_laptop_data(ip, payload):
         req  = urllib.request.Request(url, data=data,
                                        headers={"Content-Type": "application/json"},
                                        method="POST")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            body = json.loads(resp.read().decode())
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            body = json.loads(resp.read().decode(errors="replace"))
             return True, body.get("message", "Success")
     except urllib.error.HTTPError as e:
         try:
-            body = json.loads(e.read().decode())
+            body = json.loads(e.read().decode(errors="replace"))
             return False, body.get("message", str(e))
         except Exception:
-            return False, f"HTTP {e.code}"
+            return False, f"HTTP {getattr(e,'code','?')}"
     except Exception as e:
         return False, str(e)
 
@@ -120,6 +160,13 @@ def read_wifi_status():
 
 # ─── System info helpers ──────────────────────────────────────────────────────
 
+def _is_root():
+    try:
+        return os.geteuid() == 0
+    except Exception:
+        return False
+
+
 def get_system_info():
     def read_dmi(field):
         path = f"/sys/class/dmi/id/{field}"
@@ -135,23 +182,45 @@ def get_system_info():
     model        = read_dmi("product_name")
     serial       = read_dmi("product_serial")
 
-    if "lenovo" in manufacturer.lower():
+    # Lenovo quirk you already had
+    if manufacturer and "lenovo" in manufacturer.lower():
         version = read_dmi("product_version")
         if (version
-                and version.lower() not in {"unavailable", "none", "n/a", ""}
-                and not re.fullmatch(r"[\d\s]+", version)):
+                and version.lower() not in {"unavailable", "none", "n/a", ""}  # sane
+                and not re.fullmatch(r"[\d\s]+", version)):                     # not only digits
             model = version
 
-    if manufacturer and model.lower().startswith(manufacturer.lower()):
+    # If model begins with manufacturer, strip it
+    if manufacturer and model and model.lower().startswith(manufacturer.lower()):
         model = model[len(manufacturer):].strip()
 
-    return manufacturer, model, serial
+    # Handle the HP issue you mentioned earlier (normalize vendor)
+    # Many DMI tables say "Hewlett-Packard"; prefer "HP"
+    if manufacturer and manufacturer.strip().lower() in {"hewlett-packard", "hewlett packard"}:
+        manufacturer = "HP"
+
+    # And if model begins with "HP " or manufacturer prefix, strip again
+    if manufacturer and model:
+        lowm = model.lower()
+        if lowm.startswith("hp "):
+            model = model[3:].strip()
+        if lowm.startswith(manufacturer.lower() + " "):
+            model = model[len(manufacturer):].strip()
+
+    return manufacturer or "Unavailable", model or "Unavailable", serial or "Unavailable"
 
 
 def get_cpu_info():
-    model   = "Unavailable"
-    cores   = psutil.cpu_count(logical=False)
-    threads = psutil.cpu_count(logical=True)
+    model = "Unavailable"
+    cores = threads = "Unavailable"
+
+    if PSUTIL_AVAILABLE:
+        try:
+            cores   = psutil.cpu_count(logical=False) or "Unavailable"
+            threads = psutil.cpu_count(logical=True)  or "Unavailable"
+        except Exception:
+            pass
+
     try:
         with open("/proc/cpuinfo") as f:
             for line in f:
@@ -160,15 +229,29 @@ def get_cpu_info():
                     break
     except Exception:
         pass
+
     return model, cores, threads
 
 
 def get_ram_info():
-    total = round(psutil.virtual_memory().total / (1024 ** 3), 2)
+    total = "Unavailable"
     slots = []
+
+    if PSUTIL_AVAILABLE:
+        try:
+            total = round(psutil.virtual_memory().total / (1024 ** 3), 2)
+        except Exception:
+            pass
+
+    # Avoid dmidecode unless root (stability / speed)
+    if not _is_root():
+        slots.append("Run as root for detailed RAM info")
+        return total, slots
+
     try:
         out = subprocess.check_output(["dmidecode", "--type", "17"],
-                                       text=True, stderr=subprocess.DEVNULL)
+                                      text=True, stderr=subprocess.DEVNULL)
+        found_any = False
         for device in out.split("Memory Device"):
             if "Size:" in device and "No Module Installed" not in device:
                 size = type_ = speed = locator = "Unknown"
@@ -179,41 +262,63 @@ def get_ram_info():
                     elif line.startswith("Speed:"):   speed   = line.split(":", 1)[1].strip()
                     elif line.startswith("Locator:"): locator = line.split(":", 1)[1].strip()
                 slots.append(f"{locator} – {size} – {type_} – {speed}")
+                found_any = True
+        if not found_any:
+            slots.append("RAM details unavailable")
     except Exception:
-        slots.append("Run as root for detailed RAM info")
+        slots.append("RAM details unavailable (dmidecode failed)")
     return total, slots
 
 
 def get_battery_info():
-    percent = health = cycles = None
-    try:
-        bat = psutil.sensors_battery()
-        if bat:
-            percent = bat.percent
-    except Exception:
-        pass
+    percent = None
+    health  = "Unavailable"
+    cycles  = "Unavailable"
+
+    if PSUTIL_AVAILABLE:
+        try:
+            bat = psutil.sensors_battery()
+            if bat:
+                percent = bat.percent
+        except Exception:
+            pass
+
     try:
         base = "/sys/class/power_supply"
+        if not os.path.isdir(base):
+            return percent, health, cycles
+
         bats = sorted(d for d in os.listdir(base) if d.startswith("BAT"))
         if bats:
             bp = os.path.join(base, bats[0])
+
             def rv(n):
                 p = os.path.join(bp, n)
                 return open(p).read().strip() if os.path.exists(p) else None
+
             full   = rv("energy_full")        or rv("charge_full")
             design = rv("energy_full_design") or rv("charge_full_design")
             if full and design:
-                health = f"{min(round(float(full) / float(design) * 100), 100)}%"
+                try:
+                    health = f"{min(round(float(full) / float(design) * 100), 100)}%"
+                except Exception:
+                    pass
+
             c = rv("cycle_count")
             if c:
                 cycles = c
+
             if percent is None:
                 now = rv("energy_now") or rv("charge_now")
                 if now and full:
-                    percent = round(float(now) / float(full) * 100)
+                    try:
+                        percent = round(float(now) / float(full) * 100)
+                    except Exception:
+                        pass
     except Exception:
         pass
-    return percent, health or "Unavailable", cycles or "Unavailable"
+
+    return percent, health, cycles
 
 
 # ─── Audio ────────────────────────────────────────────────────────────────────
@@ -224,13 +329,17 @@ class WhiteNoisePlayer:
         self._thread  = None
 
     def _play_loop(self):
+        # If numpy missing, fallback to silence (or simply do nothing)
+        if not NP_AVAILABLE:
+            return
+
         sample_rate = 44100
-        chunk       = sample_rate // 10          # 100 ms chunks
+        chunk       = sample_rate // 10  # 100ms chunks
         try:
             subprocess.call(["amixer", "sset", "Master", "unmute"],
-                             stderr=subprocess.DEVNULL)
+                            stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             subprocess.call(["amixer", "sset", "Master", "40%"],
-                             stderr=subprocess.DEVNULL)
+                            stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         except Exception:
             pass
 
@@ -239,33 +348,35 @@ class WhiteNoisePlayer:
                 with sd.OutputStream(samplerate=sample_rate,
                                      channels=2, dtype="int16") as stream:
                     while self._playing:
-                        noise = (np.random.uniform(-1, 1, (chunk, 2)) * 32767
-                                 ).astype(np.int16)
+                        noise = (np.random.uniform(-1, 1, (chunk, 2)) * 32767).astype(np.int16)
                         stream.write(noise)
             except Exception:
-                pass
+                # If sounddevice fails, just stop cleanly
+                self._playing = False
         else:
             # Fallback: pipe raw S16_LE PCM to aplay
             try:
                 proc = subprocess.Popen(
-                    ["aplay", "-r", str(sample_rate), "-f", "S16_LE",
-                     "-c", "2", "-"],
-                    stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+                    ["aplay", "-r", str(sample_rate), "-f", "S16_LE", "-c", "2", "-"],
+                    stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL
                 )
                 while self._playing:
-                    noise = (np.random.uniform(-1, 1, (chunk, 2)) * 32767
-                             ).astype(np.int16)
+                    noise = (np.random.uniform(-1, 1, (chunk, 2)) * 32767).astype(np.int16)
                     try:
                         proc.stdin.write(noise.tobytes())
                     except Exception:
                         break
                 try:
-                    proc.stdin.close()
-                    proc.wait()
+                    if proc.stdin:
+                        proc.stdin.close()
+                    proc.wait(timeout=2)
                 except Exception:
-                    pass
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
             except Exception:
-                pass
+                self._playing = False
 
     def start(self):
         if not self._playing:
@@ -294,55 +405,63 @@ GRADE_MAP = {
 
 
 class LaptopTester:
-
-    def _apply_true_fullscreen(self):
-        """Ask the WM for REAL fullscreen (hides panels/taskbar when supported)."""
+    # ─── Small UI helper: always update UI from main thread ──────────────────
+    def ui(self, fn, *args, **kwargs):
         try:
-            # Most WMs honor this as EWMH fullscreen
-            self.root.attributes("-fullscreen", True)
+            self.root.after(0, lambda: fn(*args, **kwargs))
         except Exception:
             pass
 
-        # Some WMs need it after the window is mapped / focused
+    # ─── Fullscreen stability ────────────────────────────────────────────────
+    def _apply_true_fullscreen(self):
+        """Ask the WM for fullscreen (avoid overrideredirect loops for stability)."""
+        try:
+            self.root.attributes("-fullscreen", True)
+        except Exception:
+            pass
         try:
             self.root.lift()
             self.root.focus_force()
         except Exception:
             pass
 
-        # Optional: force EWMH fullscreen using wmctrl if present
+        # Optional EWMH nudge if wmctrl exists
         try:
             import shutil
             if shutil.which("wmctrl"):
-                # Make this window active + fullscreen
-                subprocess.call(["wmctrl", "-r", ":ACTIVE:", "-b", "add,fullscreen"],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.call(
+                    ["wmctrl", "-r", ":ACTIVE:", "-b", "add,fullscreen"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
         except Exception:
             pass
 
+        # Ensure geometry matches screen
+        try:
+            w = self.root.winfo_screenwidth()
+            h = self.root.winfo_screenheight()
+            self.root.geometry(f"{w}x{h}+0+0")
+        except Exception:
+            pass
 
     def _fullscreen_watchdog(self):
-        """Re-assert fullscreen regularly (WITHOUT overrideredirect)."""
+        """Re-assert fullscreen occasionally (no overrideredirect)."""
         if not getattr(self, "_enforce_fullscreen", False):
             return
         self._apply_true_fullscreen()
-        self.root.after(800, self._fullscreen_watchdog)
+        self.root.after(900, self._fullscreen_watchdog)
 
     def __init__(self):
         self.root = tk.Tk()
         self.root.configure(bg=BG)
         self.root.title("Laptop Hardware Tester")
 
-        # --- REAL fullscreen / kiosk-ish mode ---
+        # --- Kiosk-ish mode ---
         self._enforce_fullscreen = True
+        self.root.after(120, self._apply_true_fullscreen)
+        self.root.after(900, self._fullscreen_watchdog)
 
-        # Apply fullscreen after the window is actually created/mapped
-        self.root.after(100, self._apply_true_fullscreen)
-
-        # Keep re-applying so it doesn't "fall out" on focus changes
-        self.root.after(800, self._fullscreen_watchdog)
-
-        # Disable common escape shortcuts
+        # Disable common exit shortcuts (still allow our Exit button)
         self.root.bind("<Escape>", lambda e: "break")
         self.root.bind("<Alt-F4>", lambda e: "break")
 
@@ -364,29 +483,17 @@ class LaptopTester:
         self.current_idx = 0
         self._frames     = {}
 
+        # Keyboard bindings (bound/unbound per screen)
+        self._kbd_bound = False
+
+        # Sync lock
+        self._sync_in_progress = False
+
         self._build_all_screens()
         self._show_screen(0)
         self.root.mainloop()
 
-    def _fullscreen_watchdog(self):
-        """Re-assert fullscreen + geometry regularly (kiosk mode)."""
-        if not getattr(self, "_enforce_fullscreen", False):
-            return
-        try:
-            self.root.overrideredirect(True)
-            self.root.attributes("-fullscreen", True)
-        except Exception:
-            pass
-        try:
-            w = self.root.winfo_screenwidth()
-            h = self.root.winfo_screenheight()
-            self.root.geometry(f"{w}x{h}+0+0")
-        except Exception:
-            pass
-        self.root.after(500, self._fullscreen_watchdog)
-
     # ─── Navigation ───────────────────────────────────────────────────────────
-
     def _show_screen(self, idx):
         name = SCREEN_ORDER[idx]
         for f in self._frames.values():
@@ -418,11 +525,13 @@ class LaptopTester:
     def quit_app(self):
         self._enforce_fullscreen = False
         self._on_leave()
-        self.root.destroy()
-        sys.exit()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        sys.exit(0)
 
     # ─── Shared helpers ───────────────────────────────────────────────────────
-
     def _styled_button(self, parent, text, command, bg=GRAY, **kw):
         return tk.Button(
             parent, text=text, command=command,
@@ -445,20 +554,21 @@ class LaptopTester:
         bar.pack(side=tk.BOTTOM, fill=tk.X, padx=20)
 
         if show_back:
-            self._styled_button(bar, "◀  Previous", self._go_back
-                                 ).pack(side=tk.LEFT)
+            self._styled_button(bar, "◀  Previous", self._go_back).pack(side=tk.LEFT)
 
         # Right side: Exit | extra... | Next
-        self._styled_button(bar, "Exit", self.quit_app, bg=RED
-                            ).pack(side=tk.RIGHT, padx=(8, 0))
+        self._exit_btn = self._styled_button(bar, "Exit", self.quit_app, bg=RED)
+        self._exit_btn.pack(side=tk.RIGHT, padx=(8, 0))
 
+        # Keep references for enabling/disabling (sync button, etc.)
+        self._extra_btn_widgets = getattr(self, "_extra_btn_widgets", [])
         for btn_text, btn_cmd, btn_bg in reversed(extra_buttons):
-            self._styled_button(bar, btn_text, btn_cmd, bg=btn_bg
-                                ).pack(side=tk.RIGHT, padx=(0, 8))
+            b = self._styled_button(bar, btn_text, btn_cmd, bg=btn_bg)
+            b.pack(side=tk.RIGHT, padx=(0, 8))
+            self._extra_btn_widgets.append((btn_text, b))
 
         if show_next:
-            self._styled_button(bar, next_label + "  ▶", self._go_next
-                                ).pack(side=tk.RIGHT, padx=(0, 8))
+            self._styled_button(bar, next_label + "  ▶", self._go_next).pack(side=tk.RIGHT, padx=(0, 8))
 
         return bar
 
@@ -469,8 +579,15 @@ class LaptopTester:
         tk.Frame(frame, bg=LIGHT_GRAY, height=1).pack(fill=tk.X, padx=40)
         return lbl
 
-    # ─── Build all screens ────────────────────────────────────────────────────
+    def _set_sync_buttons_enabled(self, enabled: bool):
+        # extra buttons are stored with text; enable/disable those related to sync/power
+        for txt, btn in getattr(self, "_extra_btn_widgets", []):
+            try:
+                btn.config(state=(tk.NORMAL if enabled else tk.DISABLED))
+            except Exception:
+                pass
 
+    # ─── Build all screens ────────────────────────────────────────────────────
     def _build_all_screens(self):
         self._build_camera()
         self._build_speaker()
@@ -481,7 +598,6 @@ class LaptopTester:
     # =========================================================================
     # 1. CAMERA
     # =========================================================================
-
     def _build_camera(self):
         f = tk.Frame(self.root, bg=BG)
         self._frames["camera"] = f
@@ -493,71 +609,157 @@ class LaptopTester:
 
         self._nav_bar(f, show_back=False)
 
-        self._cap         = None
-        self._cam_running = False
-        self._cam_photo   = None
+        self._cap           = None
+        self._cam_running   = False
+        self._cam_photo     = None
+        self._cam_failcount = 0
+        self._cam_index     = None
+        self._cam_next_retry_ms = 500
 
     def _on_show_camera(self):
-        self._cap         = cv2.VideoCapture(0)
-        self._cam_running = True
-        # Delay first tick so tkinter finishes laying out the canvas
-        self.root.after(100, self._cam_tick)
+        self._cam_running   = True
+        self._cam_failcount = 0
+        self._cam_index     = None
+        self._cam_next_retry_ms = 300
+
+        if not CV_AVAILABLE:
+            self._cam_show_message("OpenCV (cv2) not installed\n(camera test unavailable)", RED)
+            return
+
+        # Try to open a camera quickly, then start ticking
+        self._try_open_camera()
+        self.root.after(120, self._cam_tick)
 
     def _on_leave_camera(self):
         self._cam_running = False
-        if self._cap:
-            self._cap.release()
-            self._cap = None
+        self._close_camera()
+
+    def _close_camera(self):
+        try:
+            if self._cap:
+                self._cap.release()
+        except Exception:
+            pass
+        self._cap = None
+        self._cam_index = None
+
+    def _cam_show_message(self, text, color=FG):
+        cw = self._cam_canvas.winfo_width()  or 640
+        ch = self._cam_canvas.winfo_height() or 480
+        self._cam_canvas.delete("all")
+        self._cam_canvas.create_text(
+            cw // 2, ch // 2,
+            text=text,
+            fill=color, font=self.fnt_med, justify=tk.CENTER
+        )
+
+    def _try_open_camera(self):
+        """Try /dev/video0..3 until one opens; set low-res for speed/stability."""
+        self._close_camera()
+
+        for idx in range(0, 4):
+            try:
+                cap = cv2.VideoCapture(idx)
+                if cap and cap.isOpened():
+                    # Set conservative res to reduce CPU and driver issues
+                    try:
+                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                        # some backends support this
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    except Exception:
+                        pass
+                    self._cap = cap
+                    self._cam_index = idx
+                    self._cam_failcount = 0
+                    self._cam_next_retry_ms = 250
+                    return True
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            except Exception:
+                continue
+
+        self._cap = None
+        self._cam_index = None
+        return False
 
     def _cam_tick(self):
         if not self._cam_running:
             return
 
-        if self._cap and self._cap.isOpened():
-            ret, frame = self._cap.read()
-            if ret:
-                if PIL_AVAILABLE:
-                    frame   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    h, w    = frame.shape[:2]
-                    cw = self._cam_canvas.winfo_width()
-                    ch = self._cam_canvas.winfo_height()
-                    # Canvas not laid out yet — skip this frame
-                    if cw < 2 or ch < 2:
-                        self.root.after(50, self._cam_tick)
-                        return
-                    scale   = min(cw / w, ch / h)
-                    nw      = max(int(w * scale), 1)
-                    nh      = max(int(h * scale), 1)
-                    img     = Image.fromarray(frame).resize(
-                        (nw, nh), Image.BILINEAR)
-                    self._cam_photo = ImageTk.PhotoImage(img)
-                    self._cam_canvas.delete("all")
-                    self._cam_canvas.create_image(
-                        cw // 2, ch // 2,
-                        anchor=tk.CENTER, image=self._cam_photo)
-                else:
-                    cw = self._cam_canvas.winfo_width()  or 400
-                    ch = self._cam_canvas.winfo_height() or 300
-                    self._cam_canvas.delete("all")
-                    self._cam_canvas.create_text(
-                        cw // 2, ch // 2,
-                        text="Camera active\n(install Pillow for live preview)",
-                        fill=FG, font=self.fnt_med, justify=tk.CENTER)
+        # If Pillow missing, we can still show "camera active" message
+        if not PIL_AVAILABLE:
+            if self._cap and self._cap.isOpened():
+                self._cam_show_message("Camera active\n(install Pillow for live preview)", FG)
             else:
-                cw = self._cam_canvas.winfo_width()  or 400
-                ch = self._cam_canvas.winfo_height() or 300
-                self._cam_canvas.delete("all")
-                self._cam_canvas.create_text(
-                    cw // 2, ch // 2,
-                    text="No camera detected",
-                    fill=RED, font=self.fnt_med)
+                # Try to open camera with backoff
+                opened = self._try_open_camera()
+                if not opened:
+                    self._cam_show_message("No camera detected\n(retrying…)", ORANGE)
+                    self.root.after(min(self._cam_next_retry_ms, 2000), self._cam_tick)
+                    self._cam_next_retry_ms = min(int(self._cam_next_retry_ms * 1.6), 2000)
+                    return
+            self.root.after(500, self._cam_tick)
+            return
 
-        self.root.after(33, self._cam_tick)   # ~30 fps
+        # Pillow is available; attempt to read frames
+        if not (self._cap and self._cap.isOpened()):
+            opened = self._try_open_camera()
+            if not opened:
+                self._cam_show_message("No camera detected\n(retrying…)", ORANGE)
+                self.root.after(min(self._cam_next_retry_ms, 2000), self._cam_tick)
+                self._cam_next_retry_ms = min(int(self._cam_next_retry_ms * 1.6), 2000)
+                return
+
+        ret = False
+        frame = None
+        try:
+            ret, frame = self._cap.read()
+        except Exception:
+            ret = False
+
+        if not ret or frame is None:
+            self._cam_failcount += 1
+            if self._cam_failcount >= 10:
+                # Re-open camera after repeated failures
+                self._close_camera()
+                self._cam_show_message("Camera read failed\n(retrying…)", ORANGE)
+                self.root.after(min(self._cam_next_retry_ms, 2000), self._cam_tick)
+                self._cam_next_retry_ms = min(int(self._cam_next_retry_ms * 1.6), 2000)
+                return
+            self.root.after(120, self._cam_tick)
+            return
+
+        self._cam_failcount = 0
+
+        try:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w = frame.shape[:2]
+            cw = self._cam_canvas.winfo_width()
+            ch = self._cam_canvas.winfo_height()
+
+            if cw < 2 or ch < 2:
+                self.root.after(60, self._cam_tick)
+                return
+
+            scale = min(cw / w, ch / h)
+            nw = max(int(w * scale), 1)
+            nh = max(int(h * scale), 1)
+            img = Image.fromarray(frame).resize((nw, nh), Image.BILINEAR)
+            self._cam_photo = ImageTk.PhotoImage(img)
+            self._cam_canvas.delete("all")
+            self._cam_canvas.create_image(cw // 2, ch // 2, anchor=tk.CENTER, image=self._cam_photo)
+        except Exception:
+            self._cam_show_message("Camera preview error\n(check Pillow/OpenCV)", RED)
+
+        # run around 20–30 fps when working; slower machines can handle it
+        self.root.after(40, self._cam_tick)
 
     # =========================================================================
     # 2. SPEAKER
     # =========================================================================
-
     def _build_speaker(self):
         f = tk.Frame(self.root, bg=BG)
         self._frames["speaker"] = f
@@ -569,19 +771,30 @@ class LaptopTester:
         centre = tk.Frame(f, bg=BG)
         centre.place(relx=0.5, rely=0.42, anchor=tk.CENTER)
 
+        msg = "Press SPACEBAR or the button to test speakers"
+        if not NP_AVAILABLE:
+            msg = "NumPy not installed → white-noise generator unavailable\n(install python3-numpy)"
+
         self._spk_status = tk.Label(
-            centre, text="Press SPACEBAR or the button to test speakers",
-            font=self.fnt_med, bg=BG, fg=FG, wraplength=int(self.W * 0.7))
+            centre, text=msg,
+            font=self.fnt_med, bg=BG, fg=FG, wraplength=int(self.W * 0.7)
+        )
         self._spk_status.pack(pady=20)
 
         self._spk_btn = self._styled_button(
-            centre, "▶   Play White Noise", self._toggle_noise, bg=GRAY)
+            centre, "▶   Play White Noise", self._toggle_noise, bg=GRAY
+        )
         self._spk_btn.pack()
 
-        # Space toggles noise only when on the speaker screen
-        self.root.bind("<space>", self._spk_space)
+        self._spk_space_bound = False
 
         self._nav_bar(f)
+
+    def _on_show_speaker(self):
+        # bind space only while on speaker screen
+        if not self._spk_space_bound:
+            self.root.bind("<space>", self._spk_space)
+            self._spk_space_bound = True
 
     def _spk_space(self, _event):
         if self.current_idx == SCREEN_ORDER.index("speaker"):
@@ -589,25 +802,39 @@ class LaptopTester:
 
     def _on_leave_speaker(self):
         self._noise_player.stop()
-        self._spk_btn.config(text="▶   Play White Noise", bg=GRAY)
-        self._spk_status.config(
-            text="Press SPACEBAR or the button to test speakers")
+        try:
+            self._spk_btn.config(text="▶   Play White Noise", bg=GRAY)
+        except Exception:
+            pass
+        if NP_AVAILABLE:
+            try:
+                self._spk_status.config(text="Press SPACEBAR or the button to test speakers")
+            except Exception:
+                pass
+        # unbind space to avoid toggles elsewhere
+        try:
+            self.root.unbind("<space>")
+        except Exception:
+            pass
+        self._spk_space_bound = False
 
     def _toggle_noise(self):
+        if not NP_AVAILABLE:
+            self._spk_status.config(text="NumPy not installed → cannot generate white noise", fg=ORANGE)
+            return
+
         if self._noise_player.playing:
             self._noise_player.stop()
             self._spk_btn.config(text="▶   Play White Noise", bg=GRAY)
-            self._spk_status.config(
-                text="Press SPACEBAR or the button to test speakers")
+            self._spk_status.config(text="Press SPACEBAR or the button to test speakers", fg=FG)
         else:
             self._noise_player.start()
             self._spk_btn.config(text="■   Stop", bg=RED)
-            self._spk_status.config(text="Playing white noise…")
+            self._spk_status.config(text="Playing white noise…", fg=FG)
 
     # =========================================================================
     # 3. KEYBOARD
     # =========================================================================
-
     def _build_keyboard(self):
         f = tk.Frame(self.root, bg=BG)
         self._frames["keyboard"] = f
@@ -621,15 +848,27 @@ class LaptopTester:
         self._key_states = {}
         self._last_key   = None
 
-        self.root.bind("<KeyPress>", self._kbd_key_press)
-        # Shift+Arrow navigation (app-wide)
-        self.root.bind("<Shift-Right>", lambda e: self._go_next())
-        self.root.bind("<Shift-Left>",  lambda e: self._go_back())
-
         self._nav_bar(f)
 
     def _on_show_keyboard(self):
+        # Bind only while this screen is active (stability)
+        if not self._kbd_bound:
+            self.root.bind("<KeyPress>", self._kbd_key_press)
+            self.root.bind("<Shift-Right>", lambda e: self._go_next())
+            self.root.bind("<Shift-Left>",  lambda e: self._go_back())
+            self._kbd_bound = True
         self.root.after(60, self._draw_keyboard)
+
+    def _on_leave_keyboard(self):
+        # Unbind to avoid capturing keys globally
+        if self._kbd_bound:
+            try:
+                self.root.unbind("<KeyPress>")
+                self.root.unbind("<Shift-Right>")
+                self.root.unbind("<Shift-Left>")
+            except Exception:
+                pass
+            self._kbd_bound = False
 
     def _kbd_key_press(self, event):
         if self.current_idx != SCREEN_ORDER.index("keyboard"):
@@ -637,7 +876,6 @@ class LaptopTester:
 
         ksym = event.keysym
 
-        # F-keys: Tkinter returns "F1", "F2" etc. directly
         if re.fullmatch(r"[Ff]\d+", ksym):
             name = ksym.upper()
         else:
@@ -664,7 +902,6 @@ class LaptopTester:
                 "Right":            "→",
                 "Home":             "HOME",
                 "End":              "END",
-                # Symbol keys
                 "minus":            "-",
                 "equal":            "=",
                 "bracketleft":      "[",
@@ -677,7 +914,6 @@ class LaptopTester:
                 "comma":            ",",
                 "period":           ".",
                 "slash":            "/",
-                # Shifted variants
                 "underscore":       "-",
                 "plus":             "=",
                 "braceleft":        "[",
@@ -702,7 +938,6 @@ class LaptopTester:
         ch = c.winfo_height() or max(self.H - 220, 400)
         c.delete("all")
 
-        # ── Layout definition ─────────────────────────────────────────────────
         f_keys    = ["ESC"] + [f"F{i}" for i in range(1, 13)]
         main_rows = [
             ["`","1","2","3","4","5","6","7","8","9","0","-","=","BACKSPACE"],
@@ -719,17 +954,15 @@ class LaptopTester:
             "SHIFT": 2.0, "BACKSPACE": 1.8, "SPACE": 6.0,
         }
 
-        # Base unit sizes (pre-scale)
         base_kw = 56
         base_kh = 46
         base_g  = 6
 
-        # Estimate total width / height needed at base scale
-        total_base_w = (15 + 1) * (base_kw + base_g)   # main keyboard
+        total_base_w = (15 + 1) * (base_kw + base_g)
         nav_cols_w   = 3 * (base_kw + base_g)
         total_w      = total_base_w + base_g * 3 + nav_cols_w
 
-        num_rows     = 1 + len(main_rows) + 1   # frow + main + bottom
+        num_rows     = 1 + len(main_rows) + 1
         total_base_h = num_rows * (base_kh + base_g) + (3 + 1) * (base_kh + base_g)
 
         scale = min(cw / total_w, ch / total_base_h, 1.0)
@@ -738,7 +971,6 @@ class LaptopTester:
         g     = max(int(base_g  * scale), 3)
         kf    = f"Arial {max(int(10 * scale), 8)}"
 
-        # Horizontal centering
         keyboard_w = int(15.3 * (kw + g))
         nav_w      = 3 * (kw + g)
         full_w     = keyboard_w + g * 4 + nav_w
@@ -755,21 +987,18 @@ class LaptopTester:
             else:
                 fill, txt_col = KEY_BG, "#111111"
             c.create_rectangle(x, y, x + w, y + h,
-                                fill=fill, outline="#222222", width=1)
-            # inner rectangle for a slightly inset look
+                               fill=fill, outline="#222222", width=1)
             c.create_rectangle(x + 2, y + 2, x + w - 2, y + h - 2,
-                                fill=fill, outline="")
+                               fill=fill, outline="")
             c.create_text(x + w // 2, y + h // 2,
                           text=label, font=kf, fill=txt_col, anchor=tk.CENTER)
 
-        # ── F-row ─────────────────────────────────────────────────────────────
         x, y = sx, sy
         for key in f_keys:
             draw_key(x, y, kw, kh, key)
             x += kw + g
         y += kh + g * 2
 
-        # ── Main rows ─────────────────────────────────────────────────────────
         for row in main_rows:
             x = sx
             for key in row:
@@ -778,7 +1007,6 @@ class LaptopTester:
                 x += w + g
             y += kh + g
 
-        # ── Bottom row ────────────────────────────────────────────────────────
         x  = sx
         y += g
         for key in bottom_row:
@@ -787,7 +1015,6 @@ class LaptopTester:
             x += w + g
         y += kh + g * 2
 
-        # ── Navigation cluster ────────────────────────────────────────────────
         nav_x = sx + keyboard_w + g * 4
         for i, key in enumerate(nav_top):
             draw_key(nav_x + i * (kw + g), y, kw, kh, key)
@@ -798,12 +1025,11 @@ class LaptopTester:
         draw_key(nav_x + kw,             arrow_y,             kw, kh, "↑")
         draw_key(nav_x,                  arrow_y + kh + g,    kw, kh, "←")
         draw_key(nav_x + kw,             arrow_y + kh + g,    kw, kh, "↓")
-        draw_key(nav_x + 2 * (kw + g),  arrow_y + kh + g,    kw, kh, "→")
+        draw_key(nav_x + 2 * (kw + g),   arrow_y + kh + g,    kw, kh, "→")
 
     # =========================================================================
     # 4. SYSTEM INFO
     # =========================================================================
-
     def _build_sysinfo(self):
         f = tk.Frame(self.root, bg=BG)
         self._frames["sysinfo"] = f
@@ -814,7 +1040,8 @@ class LaptopTester:
             f, bg=BG, fg=FG, font=self.fnt_small,
             relief=tk.FLAT, state=tk.DISABLED,
             cursor="arrow", wrap=tk.WORD,
-            selectbackground=BG, highlightthickness=0)
+            selectbackground=BG, highlightthickness=0
+        )
         self._sysinfo_text.pack(fill=tk.BOTH, expand=True, padx=50, pady=10)
 
         self._nav_bar(f)
@@ -843,7 +1070,7 @@ class LaptopTester:
             f"  Cores         :  {cores}    Threads : {threads}",
             "",
             "═══  RAM  ═══",
-            f"  Total         :  {total_ram} GB",
+            f"  Total         :  {total_ram} GB" if total_ram != "Unavailable" else "  Total         :  Unavailable",
         ]
         for slot in ram_slots:
             lines.append(f"    {slot}")
@@ -854,7 +1081,7 @@ class LaptopTester:
             f"  Health        :  {health}",
             f"  Cycle Count   :  {cycles}",
         ]
-        self.root.after(0, self._set_sysinfo_text, "\n".join(lines))
+        self.ui(self._set_sysinfo_text, "\n".join(lines))
 
     def _set_sysinfo_text(self, text):
         t = self._sysinfo_text
@@ -866,36 +1093,35 @@ class LaptopTester:
     # =========================================================================
     # 5. FINAL SCREEN
     # =========================================================================
-
     def _build_final(self):
         f = tk.Frame(self.root, bg=BG)
         self._frames["final"] = f
 
-        # Top bar: WiFi on the right
         top_bar = tk.Frame(f, bg=BG)
         top_bar.pack(fill=tk.X, padx=20, pady=(12, 0))
         self._wifi_lbl = tk.Label(top_bar, text="WiFi: checking…",
-                                   font=self.fnt_small, bg=BG, fg=ORANGE)
+                                  font=self.fnt_small, bg=BG, fg=ORANGE)
         self._wifi_lbl.pack(side=tk.RIGHT)
 
         self._title(f, "Finished")
 
         self._server_lbl = tk.Label(
             f, text=f"Server: {load_saved_ip()}:{SERVER_PORT}",
-            font=self.fnt_small, bg=BG, fg=LIGHT_GRAY)
+            font=self.fnt_small, bg=BG, fg=LIGHT_GRAY
+        )
         self._server_lbl.pack(pady=(4, 0))
 
         self._sync_status_lbl = tk.Label(
-            f, text="", font=self.fnt_med, bg=BG, fg=FG)
+            f, text="", font=self.fnt_med, bg=BG, fg=FG
+        )
         self._sync_status_lbl.pack(pady=10)
 
-        # Wizard container (shown/hidden)
         self._wiz_outer = tk.Frame(f, bg=GRAY, bd=0, relief=tk.FLAT)
         self._wiz_outer.pack(fill=tk.X, padx=int(self.W * 0.1), pady=8)
 
         self._sync_ip_var    = tk.StringVar(value=load_saved_ip())
         self._sync_csad_var  = tk.StringVar()
-        self._sync_cond_text = None   # assigned in _build_wiz_cond
+        self._sync_cond_text = None
         self._sync_grade_var = tk.StringVar(value="A-Grade (Like-New)")
 
         self._wiz_pages = {}
@@ -904,9 +1130,8 @@ class LaptopTester:
         self._build_wiz_csad()
         self._build_wiz_cond()
         self._build_wiz_grade()
-        self._close_wizard()   # hide all initially
+        self._close_wizard()
 
-        # Nav bar with extra buttons
         self._nav_bar(
             f, show_next=False,
             extra_buttons=[
@@ -915,12 +1140,26 @@ class LaptopTester:
             ]
         )
 
+        # Grab sync button widget for disable/enable
+        self._sync_btn = None
+        for txt, btn in getattr(self, "_extra_btn_widgets", []):
+            if txt == "Sync to Log":
+                self._sync_btn = btn
+                break
+
         self._wifi_timer = None
 
     def _on_show_final(self):
-        self._server_lbl.config(
-            text=f"Server: {load_saved_ip()}:{SERVER_PORT}")
+        self._server_lbl.config(text=f"Server: {load_saved_ip()}:{SERVER_PORT}")
         self._wifi_refresh()
+
+    def _on_leave_final(self):
+        try:
+            if self._wifi_timer:
+                self.root.after_cancel(self._wifi_timer)
+        except Exception:
+            pass
+        self._wifi_timer = None
 
     def _wifi_refresh(self):
         text, color = read_wifi_status()
@@ -928,7 +1167,6 @@ class LaptopTester:
         self._wifi_timer = self.root.after(3000, self._wifi_refresh)
 
     # ── Wizard internals ──────────────────────────────────────────────────────
-
     def _build_wiz_ip(self):
         p = tk.Frame(self._wiz_outer, bg=GRAY, padx=20, pady=14)
         tk.Label(p, text="Enter Server IP Address:",
@@ -959,7 +1197,7 @@ class LaptopTester:
         tk.Label(header, text="Enter CSAD (5 digits + letter) or leave empty:",
                  font=self.fnt_med, bg=GRAY, fg=FG).pack(side=tk.LEFT)
         self._csad_cnt = tk.Label(header, text="0/6",
-                                   font=self.fnt_small, bg=GRAY, fg=LIGHT_GRAY)
+                                  font=self.fnt_small, bg=GRAY, fg=LIGHT_GRAY)
         self._csad_cnt.pack(side=tk.RIGHT)
         e = tk.Entry(p, textvariable=self._sync_csad_var,
                      font=self.fnt_large, bg=BG, fg=LT_GREEN,
@@ -968,8 +1206,8 @@ class LaptopTester:
         e.bind("<Return>",  lambda _: self._wiz_csad_ok())
         e.bind("<Escape>",  lambda _: self._close_wizard())
         self._sync_csad_var.trace_add(
-            "write", lambda *_: self._csad_cnt.config(
-                text=f"{len(self._sync_csad_var.get())}/6"))
+            "write", lambda *_: self._csad_cnt.config(text=f"{len(self._sync_csad_var.get())}/6")
+        )
         row = tk.Frame(p, bg=GRAY)
         row.pack(anchor=tk.W)
         self._styled_button(row, "OK",     self._wiz_csad_ok,  BLUE).pack(side=tk.LEFT, padx=(0, 8))
@@ -985,7 +1223,6 @@ class LaptopTester:
                     insertbackground=LT_GREEN, relief=tk.FLAT,
                     height=3, wrap=tk.WORD, highlightthickness=0)
         t.pack(fill=tk.X, pady=6)
-        # Ctrl+Return or just Return advances; plain Return is allowed in text
         t.bind("<Control-Return>", lambda _: self._wiz_cond_ok())
         row = tk.Frame(p, bg=GRAY)
         row.pack(anchor=tk.W)
@@ -1006,12 +1243,10 @@ class LaptopTester:
                 lambda l=label: self._wiz_grade_ok(l),
                 BLUE
             ).pack(side=tk.LEFT, padx=(0, 8))
-        self._styled_button(row, "Cancel", self._close_wizard, GRAY
-                            ).pack(side=tk.LEFT)
+        self._styled_button(row, "Cancel", self._close_wizard, GRAY).pack(side=tk.LEFT)
         self._wiz_pages["grade"] = p
 
     # ── Wizard page switching ─────────────────────────────────────────────────
-
     def _show_wiz_page(self, name):
         for p in self._wiz_pages.values():
             p.pack_forget()
@@ -1022,8 +1257,9 @@ class LaptopTester:
             p.pack_forget()
 
     # ── Wizard step callbacks ─────────────────────────────────────────────────
-
     def _start_sync(self):
+        if self._sync_in_progress:
+            return
         self._sync_status_lbl.config(text="", fg=FG)
         self._sync_ip_var.set(load_saved_ip())
         self._show_wiz_page("ip")
@@ -1033,6 +1269,8 @@ class LaptopTester:
         ))
 
     def _wiz_ip_ok(self):
+        if self._sync_in_progress:
+            return
         ip = self._sync_ip_var.get().strip()
         if ip:
             save_ip(ip)
@@ -1042,9 +1280,9 @@ class LaptopTester:
     def _do_connect(self, ip):
         ok = ping_server(ip)
         if ok:
-            self.root.after(0, self._connected)
+            self.ui(self._connected)
         else:
-            self.root.after(0, self._connect_failed, ip)
+            self.ui(self._connect_failed, ip)
 
     def _connected(self):
         self._sync_csad_var.set("")
@@ -1055,28 +1293,66 @@ class LaptopTester:
 
     def _connect_failed(self, ip):
         self._close_wizard()
-        self._sync_status_lbl.config(
-            text=f"Failed to connect to {ip}:{SERVER_PORT}", fg=RED)
+        self._sync_status_lbl.config(text=f"Failed to connect to {ip}:{SERVER_PORT}", fg=RED)
 
     def _wiz_csad_ok(self):
+        if self._sync_in_progress:
+            return
         val = self._sync_csad_var.get().strip()
         if val == "" or re.fullmatch(r"\d{5}[A-Za-z]", val):
             self._sync_csad_var.set(val.upper())
             self._show_wiz_page("cond")
             self.root.after(50, lambda: self._sync_cond_text.focus_set())
         else:
-            self._sync_status_lbl.config(
-                text="CSAD: 5 digits + one letter, or leave empty", fg=RED)
+            self._sync_status_lbl.config(text="CSAD: 5 digits + one letter, or leave empty", fg=RED)
 
     def _wiz_cond_ok(self):
+        if self._sync_in_progress:
+            return
         self._show_wiz_page("grade")
 
     def _wiz_grade_ok(self, grade):
+        if self._sync_in_progress:
+            return
         self._sync_grade_var.set(grade)
         self._close_wizard()
-        threading.Thread(target=self._do_submit, args=(grade,), daemon=True).start()
 
-    def _do_submit(self, grade):
+        self._sync_in_progress = True
+        if self._sync_btn:
+            try:
+                self._sync_btn.config(state=tk.DISABLED)
+            except Exception:
+                pass
+        self._sync_status_lbl.config(text="Syncing…", fg=ORANGE)
+
+        threading.Thread(target=self._do_submit_with_retry, args=(grade,), daemon=True).start()
+
+    def _do_submit_with_retry(self, grade):
+        # Up to 3 attempts with small backoff
+        last_ok = False
+        last_msg = "Unknown error"
+        for attempt in range(1, 4):
+            ok, msg = self._do_submit_once(grade)
+            last_ok, last_msg = ok, msg
+            if ok:
+                break
+            time.sleep(0.6 * attempt)
+
+        if last_ok:
+            self.ui(self._sync_status_lbl.config, text="✔  SYNC SUCCESSFUL", fg=GREEN)
+        else:
+            self.ui(self._sync_status_lbl.config, text=f"✘  SYNC FAILED: {last_msg}", fg=RED)
+
+        def unlock():
+            self._sync_in_progress = False
+            if self._sync_btn:
+                try:
+                    self._sync_btn.config(state=tk.NORMAL)
+                except Exception:
+                    pass
+        self.ui(unlock)
+
+    def _do_submit_once(self, grade):
         try:
             _, model, serial      = get_system_info()
             cpu_string, _, _      = get_cpu_info()
@@ -1084,6 +1360,7 @@ class LaptopTester:
             _, battery_health, _  = get_battery_info()
             condition = (self._sync_cond_text.get("1.0", tk.END).strip()
                          if self._sync_cond_text else "")
+
             payload = {
                 "model":           model,
                 "serial":          serial,
@@ -1096,23 +1373,33 @@ class LaptopTester:
             }
             ip = self._sync_ip_var.get().strip() or load_saved_ip()
             ok, msg = post_laptop_data(ip, payload)
-            if ok:
-                self.root.after(0, lambda: self._sync_status_lbl.config(
-                    text="✔  SYNC SUCCESSFUL", fg=GREEN))
-            else:
-                self.root.after(0, lambda: self._sync_status_lbl.config(
-                    text=f"✘  SYNC FAILED: {msg}", fg=RED))
+            return ok, msg
         except Exception as e:
-            self.root.after(0, lambda: self._sync_status_lbl.config(
-                text=f"✘  ERROR: {e}", fg=RED))
+            return False, str(e)
 
     # ── Power off ─────────────────────────────────────────────────────────────
-
     def _power_off(self):
         ip = self._sync_ip_var.get().strip() or load_saved_ip()
         save_ip(ip)
-        for _ in range(3):
+
+        # Best effort to flush
+        try:
             subprocess.call(["sync"])
+            subprocess.call(["sync"])
+        except Exception:
+            pass
+
+        # Try normal poweroff first
+        for cmd in (["poweroff"], ["/sbin/poweroff"], ["shutdown", "-h", "now"]):
+            try:
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # give it a moment; if it works, we won't return
+                time.sleep(3)
+                break
+            except Exception:
+                continue
+
+        # If still alive, try sysrq poweroff
         try:
             with open("/proc/sys/kernel/sysrq", "w") as f:
                 f.write("1")
@@ -1122,15 +1409,85 @@ class LaptopTester:
             time.sleep(5)
         except Exception:
             pass
-        for cmd in [["poweroff", "-f"], ["/sbin/poweroff", "-f"]]:
+
+        # Last resort forced
+        for cmd in (["poweroff", "-f"], ["/sbin/poweroff", "-f"]):
             try:
-                subprocess.call(cmd)
+                subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 time.sleep(3)
             except Exception:
                 continue
 
+    # =========================================================================
+    # Error screen helper
+    # =========================================================================
+    def show_fatal_error(self, message: str):
+        try:
+            # Clear and show a simple fatal message
+            for f in self._frames.values():
+                f.pack_forget()
+            f = tk.Frame(self.root, bg=BG)
+            f.pack(fill=tk.BOTH, expand=True)
+            self._title(f, "ERROR")
+            lbl = tk.Label(
+                f,
+                text=message,
+                font=self.fnt_med,
+                bg=BG,
+                fg=RED,
+                wraplength=int(self.W * 0.85),
+                justify=tk.LEFT
+            )
+            lbl.pack(padx=40, pady=30, anchor=tk.W)
+            self._styled_button(f, "Exit", self.quit_app, bg=RED).pack(padx=40, pady=10, anchor=tk.W)
+        except Exception:
+            # If even UI fails, just print
+            print(message, file=sys.stderr)
 
-# ─── Entry point ──────────────────────────────────────────────────────────────
+
+# ─── Entry point with crash catcher ───────────────────────────────────────────
+def _write_crash_log(exc: BaseException):
+    try:
+        tb = traceback.format_exc()
+        with open(CRASH_LOG, "a") as f:
+            f.write("\n" + "="*70 + "\n")
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
+            f.write(tb + "\n")
+    except Exception:
+        pass
+
 
 if __name__ == "__main__":
-    LaptopTester()
+    try:
+        LaptopTester()
+    except Exception as e:
+        _write_crash_log(e)
+        # Try to show a minimal Tk error window
+        try:
+            root = tk.Tk()
+            root.configure(bg=BG)
+            root.title("Laptop Hardware Tester - Crash")
+            w = root.winfo_screenwidth()
+            h = root.winfo_screenheight()
+            try:
+                root.attributes("-fullscreen", True)
+            except Exception:
+                pass
+            msg = (
+                "The tester crashed.\n\n"
+                f"Error: {e}\n\n"
+                f"A crash log was saved to:\n{CRASH_LOG}\n\n"
+                "Take a photo of this screen, then reboot."
+            )
+            lbl = tk.Label(root, text=msg, bg=BG, fg=RED, font=("Arial", 18), justify=tk.LEFT,
+                           wraplength=int(w * 0.85))
+            lbl.pack(padx=40, pady=40, anchor=tk.W)
+            btn = tk.Button(root, text="Exit", bg=RED, fg=FG, font=("Arial", 16),
+                            relief=tk.FLAT, command=lambda: root.destroy())
+            btn.pack(padx=40, pady=10, anchor=tk.W)
+            root.mainloop()
+        except Exception:
+            # Fall back to stderr if GUI can't come up
+            print("Tester crashed:", e, file=sys.stderr)
+            traceback.print_exc()
+            sys.exit(1)
