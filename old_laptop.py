@@ -141,21 +141,80 @@ def post_laptop_data(ip, payload):
 
 
 def read_wifi_status():
+    # 1) NetworkManager (nmcli)
     try:
-        if not os.path.exists(WIFI_STATUS_FILE):
-            return "WiFi: manager not running", ORANGE
-        with open(WIFI_STATUS_FILE) as f:
-            data = json.load(f)
-        status = data.get("status", "unknown")
-        ssid   = data.get("ssid") or data.get("target_ssid") or "Engineering"
-        if status == "connected":    return f"WiFi: Connected ({ssid})", GREEN
-        if status == "connecting":   return f"WiFi: Connecting to {ssid}…", ORANGE
-        if status == "no_adapter":   return "WiFi: no adapter", RED
-        if status == "disconnected": return f"WiFi: Not connected ({ssid})", RED
-        if status == "error":        return f"WiFi: error ({data.get('message','')})", RED
-        return "WiFi: unknown", ORANGE
+        import shutil
+        if shutil.which("nmcli"):
+            # Are we connected?
+            out = subprocess.check_output(
+                ["nmcli", "-t", "-f", "WIFI,GSTATE,STATE", "general"],
+                text=True, stderr=subprocess.DEVNULL
+            ).strip().splitlines()
+            # Example lines: WIFI:enabled, STATE:connected, etc.
+            state = ""
+            wifi  = ""
+            for line in out:
+                if line.startswith("STATE:"):
+                    state = line.split(":", 1)[1].strip()
+                if line.startswith("WIFI:"):
+                    wifi = line.split(":", 1)[1].strip()
+
+            if wifi == "disabled":
+                return "WiFi: disabled", RED
+
+            if state == "connected":
+                ssid = subprocess.check_output(
+                    ["nmcli", "-t", "-f", "ACTIVE,SSID", "dev", "wifi"],
+                    text=True, stderr=subprocess.DEVNULL
+                )
+                # Find the active one
+                for l in ssid.splitlines():
+                    if l.startswith("yes:"):
+                        return f"WiFi: Connected ({l.split(':',1)[1]})", GREEN
+                return "WiFi: Connected", GREEN
+
+            return "WiFi: Not connected", ORANGE
     except Exception:
-        return "WiFi: status unavailable", ORANGE
+        pass
+
+    # 2) Connman (common on antiX)
+    try:
+        import shutil
+        if shutil.which("connmanctl"):
+            # If it prints "State = online" / "ready"
+            out = subprocess.check_output(
+                ["connmanctl", "state"],
+                text=True, stderr=subprocess.DEVNULL
+            ).strip().lower()
+            if "online" in out or "ready" in out:
+                # Best-effort SSID
+                try:
+                    ssid = subprocess.check_output(
+                        ["iwgetid", "-r"],
+                        text=True, stderr=subprocess.DEVNULL
+                    ).strip()
+                    if ssid:
+                        return f"WiFi: Connected ({ssid})", GREEN
+                except Exception:
+                    pass
+                return "WiFi: Connected", GREEN
+            return "WiFi: Not connected", ORANGE
+    except Exception:
+        pass
+
+    # 3) Fallback: iwgetid only
+    try:
+        import shutil
+        if shutil.which("iwgetid"):
+            ssid = subprocess.check_output(["iwgetid", "-r"], text=True,
+                                           stderr=subprocess.DEVNULL).strip()
+            if ssid:
+                return f"WiFi: Connected ({ssid})", GREEN
+            return "WiFi: Not connected", ORANGE
+    except Exception:
+        pass
+
+    return "WiFi: status unavailable", ORANGE
 
 
 # ─── System info helpers ──────────────────────────────────────────────────────
