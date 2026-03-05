@@ -1,20 +1,12 @@
 # laptoptester
 
-Laptop hardware test flow (`laptop_tester.py`) plus a separate WiFi background manager (`wifi_manager.py`).
+Laptop hardware test flow (`laptop_tester.py`) plus a separate WiFi background manager (`wifi_manager.py`) and the receiving server (`server.exe`).
 
-## Run
+## How To
 
-Start WiFi manager in the background at startup:
+- Run `latop_tester.py` on laptop being tested (optional: create startup script to launch on boot).
+- Run `server.exe` on Windows pc as long as testing is going on.
+- Ensure `Laptop_Templates.xlsx` is in the ~/Documents/LaptopSync directory
 
-```bash
-python3 wifi_manager.py &
-```
+IDK good luck. The tester runs for me on puppylinux and maybe I'll save a clonezilla image to this repository with all my personal data wiped.
 
-Then run the tester UI:
-
-```bash
-python3 laptop_tester.py
-```
-
-The tester no longer performs WiFi connect/reconnect operations in its UI loop.  
-It only reads `/tmp/laptoptester_wifi_status.json` and shows status on the final screen.
