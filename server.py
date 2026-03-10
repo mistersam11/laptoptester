@@ -250,11 +250,14 @@ def append_to_log(data):
 
     model = data.get("model", "")
 
-    # Find matching template row
+    # Find matching template row.
+    # Checks both directions so that a sent model of "HP EliteBook 840 G1"
+    # matches a template entry of "EliteBook 840 G1", and vice-versa.
     template_row = None
+    sent_lower   = model.strip().lower()
     for row in template_ws.iter_rows(min_row=2):
-        template_model = str(row[5].value).strip()
-        if model.lower() in template_model.lower():
+        template_model = str(row[5].value).strip().lower()
+        if sent_lower in template_model or template_model in sent_lower:
             template_row = row
             break
 
