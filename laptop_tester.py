@@ -715,20 +715,64 @@ def final_screen():
     wifi_check_interval = 3.0
     last_wifi_check = 0.0
 
+    # Cache expensive hardware/system values once for this final screen session.
+    # IMPORTANT: ram_slots comes directly from get_ram_info() so formatting
+    # is identical to the current server payload expectations.
+    cached_model = ""
+    cached_serial = ""
+    cached_cpu_string = ""
+    cached_ram_slots = []
+    cached_battery_health = "Unavailable"
+
+    try:
+        _, cached_model, cached_serial = get_system_info()
+    except Exception:
+        pass
+
+    try:
+        cached_cpu_string, _, _ = get_cpu_info()
+    except Exception:
+        pass
+
+    try:
+        _, cached_ram_slots = get_ram_info()
+    except Exception:
+        pass
+
+    try:
+        _, cached_battery_health, _ = get_battery_info()
+    except Exception:
+        pass
+
     def submit_sync(selected_grade):
         nonlocal sync_status, sync_color
         try:
-            _, model, serial = get_system_info()
-            cpu_string, _, _ = get_cpu_info()
-            _, ram_slots = get_ram_info()
-            _, battery_health, _ = get_battery_info()
+            if not cached_model or not cached_serial:
+                _, cached_model_fallback, cached_serial_fallback = get_system_info()
+            else:
+                cached_model_fallback, cached_serial_fallback = cached_model, cached_serial
+
+            if not cached_cpu_string:
+                cached_cpu_string_fallback, _, _ = get_cpu_info()
+            else:
+                cached_cpu_string_fallback = cached_cpu_string
+
+            if not cached_ram_slots:
+                _, cached_ram_slots_fallback = get_ram_info()
+            else:
+                cached_ram_slots_fallback = cached_ram_slots
+
+            if cached_battery_health in {"", "Unavailable"}:
+                _, cached_battery_health_fallback, _ = get_battery_info()
+            else:
+                cached_battery_health_fallback = cached_battery_health
 
             payload = {
-                "model": model,
-                "serial": serial,
-                "cpu_string": cpu_string,
-                "ram_slots": ram_slots,
-                "battery_health": battery_health,
+                "model": cached_model_fallback,
+                "serial": cached_serial_fallback,
+                "cpu_string": cached_cpu_string_fallback,
+                "ram_slots": cached_ram_slots_fallback,
+                "battery_health": cached_battery_health_fallback,
                 "condition": condition_input.strip(),
                 "csad_value": csad_input.strip(),
                 "condition_grade": selected_grade,

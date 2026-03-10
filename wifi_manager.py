@@ -8,7 +8,8 @@ import time
 WIFI_SSID = "Engineering"
 WIFI_PASSWORD = "Csad!123"
 WIFI_STATUS_FILE = "/tmp/laptoptester_wifi_status.json"
-CHECK_INTERVAL = 3.0
+CHECK_INTERVAL_DISCONNECTED = 3.0
+CHECK_INTERVAL_CONNECTED = 15.0
 RETRY_INTERVAL = 10.0
 
 
@@ -75,20 +76,24 @@ def get_wifi_info_wpa(interface, target_ssid):
 
 def main():
     last_connect_attempt = 0.0
+    sleep_interval = CHECK_INTERVAL_DISCONNECTED
 
     while True:
         interface = get_wifi_interface()
         if not interface:
             write_status("no_adapter")
-            time.sleep(CHECK_INTERVAL)
+            sleep_interval = CHECK_INTERVAL_DISCONNECTED
+            time.sleep(sleep_interval)
             continue
 
         try:
             connected, ssid, signal, ip = get_wifi_info_wpa(interface, WIFI_SSID)
             if connected:
                 write_status("connected", ssid=ssid, signal=signal, ip=ip)
+                sleep_interval = CHECK_INTERVAL_CONNECTED
             else:
                 write_status("disconnected", ssid=WIFI_SSID)
+                sleep_interval = CHECK_INTERVAL_DISCONNECTED
                 now = time.time()
                 if now - last_connect_attempt >= RETRY_INTERVAL:
                     last_connect_attempt = now
@@ -98,8 +103,9 @@ def main():
                         write_status("error", message="connect_failed", ssid=WIFI_SSID)
         except Exception as e:
             write_status("error", message=str(e))
+            sleep_interval = CHECK_INTERVAL_DISCONNECTED
 
-        time.sleep(CHECK_INTERVAL)
+        time.sleep(sleep_interval)
 
 
 if __name__ == "__main__":
