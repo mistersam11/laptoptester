@@ -968,9 +968,13 @@ class KeyboardScreen(BaseScreen):
         # suppresses traversal — unlike bind_all which runs too late.
         self.app.root.bind_all('<KeyPress>',   self._key_down)
         self.app.root.bind_all('<KeyRelease>', self._key_up)
-        # Explicitly grab F10 so Tk doesn't treat it as a menu accelerator
-        self.app.root.bind('<F10>',            self._f10_down)
-        self.app.root.bind('<KeyRelease-F10>', self._f10_up)
+        # Explicitly grab F10/media-mute globally so Tk doesn't treat F10 as
+        # a menu accelerator and so laptop Fn layers (XF86AudioMute) still
+        # highlight the F10 key on tester layouts.
+        self.app.root.bind_all('<F10>',                 self._f10_down)
+        self.app.root.bind_all('<KeyRelease-F10>',      self._f10_up)
+        self.app.root.bind_all('<XF86AudioMute>',       self._f10_down)
+        self.app.root.bind_all('<KeyRelease-XF86AudioMute>', self._f10_up)
         self._canvas.bind('<Tab>',          self._block_key)
         self._canvas.bind('<ISO_Left_Tab>', self._block_key)
         self._canvas.bind('<space>',        self._block_key)
@@ -986,8 +990,10 @@ class KeyboardScreen(BaseScreen):
         try:
             self.app.root.unbind_all('<KeyPress>')
             self.app.root.unbind_all('<KeyRelease>')
-            self.app.root.unbind('<F10>')
-            self.app.root.unbind('<KeyRelease-F10>')
+            self.app.root.unbind_all('<F10>')
+            self.app.root.unbind_all('<KeyRelease-F10>')
+            self.app.root.unbind_all('<XF86AudioMute>')
+            self.app.root.unbind_all('<KeyRelease-XF86AudioMute>')
             self._canvas.unbind('<Tab>')
             self._canvas.unbind('<ISO_Left_Tab>')
             self._canvas.unbind('<space>')
