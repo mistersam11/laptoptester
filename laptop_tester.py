@@ -331,33 +331,46 @@ def _load_battery(info):
     except:
         pass
 
-def get_wifi():
+def _get_wifi_interface():
+    """Return the first wireless interface found in /sys/class/net, or None."""
     try:
-        r = subprocess.run(
-            ['nmcli', '-t', '-f', 'TYPE,STATE,CONNECTION', 'device'],
-            capture_output=True, text=True, timeout=2)
-        for line in r.stdout.splitlines():
-            pts = line.split(':')
-            if len(pts) >= 2 and pts[0].lower() == 'wifi':
-                st   = pts[1].lower()
-                conn = pts[2] if len(pts) > 2 else ''
-                if st == 'connected':
-                    return ('WiFi: ' + conn) if conn else 'WiFi: Connected', True
-                elif 'connect' in st:
-                    return 'WiFi: Connecting\u2026', False
-                else:
-                    return 'WiFi: Off', False
-        return 'No WiFi Adapter', False
+        for iface in os.listdir('/sys/class/net'):
+            if os.path.exists(f'/sys/class/net/{iface}/wireless'):
+                return iface
     except:
         pass
+    return None
+
+def get_wifi():
+    iface = _get_wifi_interface()
+    if not iface:
+        return 'No WiFi Adapter', False
+
+    # Get connected SSID via iwgetid
     try:
-        r = subprocess.run(['iwconfig'], capture_output=True, text=True, timeout=2)
-        m = re.search(r'ESSID:"([^"]+)"', r.stdout)
-        if m and m.group(1) != 'off/any':
-            return 'WiFi: ' + m.group(1), True
-        return 'WiFi: Off', False
+        ssid = subprocess.run(['iwgetid', '-r'], capture_output=True,
+                              text=True, timeout=2).stdout.strip()
     except:
-        return 'WiFi: Unknown', False
+        ssid = ''
+
+    # Get IP address via ip addr
+    ip = None
+    try:
+        out = subprocess.run(['ip', '-4', 'addr', 'show', iface],
+                             capture_output=True, text=True, timeout=2).stdout
+        for line in out.splitlines():
+            if line.strip().startswith('inet '):
+                ip = line.split()[1].split('/')[0]
+                break
+    except:
+        pass
+
+    if ssid and ip:
+        return 'WiFi: ' + ssid, True
+    elif ssid:
+        return 'WiFi: ' + ssid + ' (no IP)', False
+    else:
+        return 'WiFi: Off', False
 
 def short_model(info):
     model = info.get('model', 'Unknown')
@@ -616,12 +629,27 @@ class FooterBar(tk.Frame):
             takefocus=0, command=app.next_screen)
         self.next_btn.pack(side='right', padx=12, pady=8)
 
+        self.power_btn = tk.Button(self, text='\u23fb  Power Off',
+            font=(FONT_SANS, 12, 'bold'),
+            bg='#2a0808', fg=ERROR_C,
+            activebackground='#4a1010', activeforeground=ERROR_C,
+            bd=0, relief='flat', padx=22, pady=8, cursor='hand2',
+            takefocus=0, command=app.poweroff)
+        # power_btn is packed/unpacked by update_nav
+
     def update_nav(self, idx, total):
         self.title_lbl.config(
             text=SCREEN_TITLES[idx] + '  \u00b7  ' + str(idx + 1) + ' / ' + str(total))
         self.prev_btn.config(
             state='normal' if idx > 0 else 'disabled',
             fg=TEXT if idx > 0 else SUBTEXT)
+        # On the last screen (Sync) swap Next for Power Off
+        if idx == total - 1:
+            self.next_btn.pack_forget()
+            self.power_btn.pack(side='right', padx=12, pady=8)
+        else:
+            self.power_btn.pack_forget()
+            self.next_btn.pack(side='right', padx=12, pady=8)
 
 # ─── Base screen ───────────────────────────────────────────────────────────────
 class BaseScreen(tk.Frame):
@@ -884,36 +912,30 @@ class KeyboardScreen(BaseScreen):
         self._canvas.itemconfig(t, fill=txt_color)
 
     def on_show(self):
+        # bind_all handles every key EXCEPT Tab and Space, which need special
+        # treatment.  Instance-level bindings on the canvas fire before Tk's
+        # class-level focus-traversal logic, so returning 'break' here truly
+        # suppresses traversal — unlike bind_all which runs too late.
         self.app.root.bind_all('<KeyPress>',   self._key_down)
         self.app.root.bind_all('<KeyRelease>', self._key_up)
-        # Block Tab / Shift-Tab at both the physical key level AND the virtual
-        # event level.  Tkinter's focus traversal is triggered by the
-        # <<NextWindow>> / <<PrevWindow>> virtual events which fire *after* the
-        # raw <Tab> event, so we must suppress both to fully prevent focus from
-        # moving to a nav button (which Space would then accidentally click).
-        self.app.root.bind_all('<Tab>',           self._block_key)
-        self.app.root.bind_all('<ISO_Left_Tab>',  self._block_key)
-        self.app.root.bind_all('<<NextWindow>>',  lambda e: 'break')
-        self.app.root.bind_all('<<PrevWindow>>',  lambda e: 'break')
-        # Block Space from activating any focused button widget.
-        self.app.root.bind_all('<space>',         self._block_key)
-        # Keep focus on the canvas so key events always land here
+        self._canvas.bind('<Tab>',          self._block_key)
+        self._canvas.bind('<ISO_Left_Tab>', self._block_key)
+        self._canvas.bind('<space>',        self._block_key)
         self._canvas.focus_set()
 
     def _block_key(self, ev):
-        """Register the key press visually, but suppress Tk's default action."""
+        """Register the key press visually, suppress Tk's default action."""
         self._key_down(ev)
         return 'break'
 
     def on_hide(self):
+        self.app.kb_block_traversal = False
         try:
             self.app.root.unbind_all('<KeyPress>')
             self.app.root.unbind_all('<KeyRelease>')
-            self.app.root.unbind_all('<Tab>')
-            self.app.root.unbind_all('<ISO_Left_Tab>')
-            self.app.root.unbind_all('<<NextWindow>>')
-            self.app.root.unbind_all('<<PrevWindow>>')
-            self.app.root.unbind_all('<space>')
+            self._canvas.unbind('<Tab>')
+            self._canvas.unbind('<ISO_Left_Tab>')
+            self._canvas.unbind('<space>')
         except:
             pass
     def _key_down(self, ev):
@@ -1344,30 +1366,6 @@ class SyncScreen(BaseScreen):
                 bd=0, relief='flat', padx=22, pady=12, cursor='hand2',
                 command=lambda: self._goto(self.STEP_GRADE)).pack(pady=8)
 
-        # ── Power Off button ── bottom-right, bypasses PuppyLinux dialogue ──
-        po_frame = tk.Frame(self._content, bg=BG)
-        po_frame.pack(side='bottom', fill='x', padx=20, pady=(0, 16))
-        tk.Button(po_frame, text='\u23fb  Power Off',
-            font=(FONT_SANS, 12, 'bold'),
-            bg='#2a0808', fg=ERROR_C,
-            activebackground='#4a1010', activeforeground=ERROR_C,
-            bd=0, relief='flat', padx=18, pady=8, cursor='hand2',
-            command=self._poweroff).pack(side='right')
-
-    def _poweroff(self):
-        """Immediate poweroff — bypasses the PuppyLinux 'save session?' dialogue."""
-        try:
-            subprocess.Popen(['sudo', 'poweroff', '-f'])
-        except Exception:
-            # Fallback: try systemctl, then halt
-            for cmd in [['sudo', 'systemctl', 'poweroff', '--force'],
-                        ['sudo', 'halt', '-f', '-p']]:
-                try:
-                    subprocess.Popen(cmd)
-                    break
-                except Exception:
-                    pass
-
     def _reset(self):
         self._csad.set('')
         self._grade.set('')
@@ -1424,6 +1422,9 @@ class App:
         self.system_info  = {}
         self._idx         = 0
         self._active      = None
+        # When True (keyboard screen active), Tab/Space/NextWindow are intercepted
+        # at the App level so they never cause focus traversal.
+        self.kb_block_traversal = False
 
         threading.Thread(target=self._load_info, daemon=True).start()
 
@@ -1490,6 +1491,19 @@ class App:
             except:
                 pass
         self.root.destroy()
+
+    def poweroff(self):
+        """Immediate poweroff — bypasses the PuppyLinux 'save session?' dialogue."""
+        try:
+            subprocess.Popen(['sudo', 'poweroff', '-f'])
+        except:
+            for cmd in [['sudo', 'systemctl', 'poweroff', '--force'],
+                        ['sudo', 'halt', '-f', '-p']]:
+                try:
+                    subprocess.Popen(cmd)
+                    break
+                except:
+                    pass
 
     def run(self):
         self.root.mainloop()
