@@ -556,6 +556,9 @@ KB_ALIAS = {
     'KP_4':'4','KP_5':'5','KP_6':'6','KP_7':'7','KP_8':'8','KP_9':'9',
     'KP_Decimal':'period','KP_Add':'equal','KP_Subtract':'minus',
     'KP_Multiply':'8','KP_Divide':'slash',
+
+    'XF86AudioMute': 'F10',
+    'XF86AudioMicMute': 'F10',
 }
 
 # ─── Header ────────────────────────────────────────────────────────────────────
@@ -804,6 +807,8 @@ class KeyboardScreen(BaseScreen):
         self._pressed = set()
         self._done    = set()
         self._canvas  = None
+        self._current_key_var = tk.StringVar(value='Current key: None')
+        self._current_key_lbl = None
 
         # Compute UNIT so the keyboard fills ~90 % of screen width,
         # but also cap it so it fits vertically (header ~50, footer ~50,
@@ -824,9 +829,9 @@ class KeyboardScreen(BaseScreen):
         tk.Label(self, text='KEYBOARD TEST', font=(FONT_SANS, 11, 'bold'),
             bg=BG, fg=SUBTEXT).pack(pady=(14, 3))
         tk.Label(self,
-            text='Press every key \u2014 white\u2009=\u2009untested  \u00b7  '
-                 'bright green\u2009=\u2009pressed  \u00b7  '
-                 'light green\u2009=\u2009tested',
+            text='Press every key — white = untested  ·  '
+                 'bright green = pressed  ·  '
+                 'light green = tested',
             font=(FONT_SANS, 10), bg=BG, fg=SUBTEXT).pack()
 
         outer = tk.Frame(self, bg=BG)
@@ -840,6 +845,17 @@ class KeyboardScreen(BaseScreen):
             bg=BG, highlightthickness=0)
         self._canvas.pack()
         self._draw_all_keys()
+
+        self._current_key_lbl = tk.Label(
+            outer,
+            textvariable=self._current_key_var,
+            font=(FONT_MONO, 18, 'bold'),
+            bg=PANEL,
+            fg=ACCENT,
+            padx=18,
+            pady=8
+        )
+        self._current_key_lbl.pack(pady=(12, 0))
 
     def _draw_all_keys(self):
         U = self.UNIT
@@ -911,9 +927,43 @@ class KeyboardScreen(BaseScreen):
         self._canvas.itemconfig(r, fill=fill)
         self._canvas.itemconfig(t, fill=txt_color)
 
+    def _label_for_resolved_key(self, resolved):
+        if resolved in self._items:
+            _, text_id = self._items[resolved]
+            try:
+                label = self._canvas.itemcget(text_id, 'text')
+                if label:
+                    return label
+            except:
+                pass
+        return str(resolved)
+
+    def _pretty_key_name(self, ev, resolved):
+        if resolved in self._items:
+            _, text_id = self._items[resolved]
+            try:
+                label = self._canvas.itemcget(text_id, 'text')
+                if label:
+                    return label
+            except:
+                pass
+
+        if ev.keysym == 'space':
+            return 'Space'
+        if ev.keysym == 'Return':
+            return 'Enter'
+        if ev.keysym == 'BackSpace':
+            return 'Backspace'
+        if ev.keysym == 'Escape':
+            return 'Esc'
+
+        return ev.keysym
+
     def on_show(self):
+        self._current_key_var.set('Current key: None')
+
         # bind_all handles every key EXCEPT Tab and Space, which need special
-        # treatment.  Instance-level bindings on the canvas fire before Tk's
+        # treatment. Instance-level bindings on the canvas fire before Tk's
         # class-level focus-traversal logic, so returning 'break' here truly
         # suppresses traversal — unlike bind_all which runs too late.
         self.app.root.bind_all('<KeyPress>',   self._key_down)
@@ -938,17 +988,29 @@ class KeyboardScreen(BaseScreen):
             self._canvas.unbind('<space>')
         except:
             pass
+
     def _key_down(self, ev):
+        print("keysym =", ev.keysym, " keycode =", ev.keycode)
+
         ks = self._resolve(ev.keysym)
         self._pressed.add(ks)
         self._done.add(ks)
         self._set_color(ks, KEY_HELD, KEY_TXT_L)
+
+        pretty = self._pretty_key_name(ev, ks)
+        self._current_key_var.set('Current key: ' + pretty)
 
     def _key_up(self, ev):
         ks = self._resolve(ev.keysym)
         self._pressed.discard(ks)
         if ks in self._done:
             self._set_color(ks, KEY_DONE, KEY_TXT_D)
+
+        if self._pressed:
+            last = sorted(self._pressed)[-1]
+            self._current_key_var.set('Current key: ' + self._label_for_resolved_key(last))
+        else:
+            self._current_key_var.set('Current key: None')
 
 # ─── Screen 4 : System Info ────────────────────────────────────────────────────
 class InfoScreen(BaseScreen):
@@ -1493,17 +1555,32 @@ class App:
         self.root.destroy()
 
     def poweroff(self):
-        """Immediate poweroff — bypasses the PuppyLinux 'save session?' dialogue."""
+        """Immediate poweroff with several fallbacks for Puppy/Linux systems."""
+        commands = [
+            ['poweroff', '-f'],
+            ['busybox', 'poweroff', '-f'],
+            ['systemctl', 'poweroff', '--force', '--force'],
+            ['halt', '-f', '-p'],
+            ['wmpoweroff'],
+            ['sudo', 'poweroff', '-f'],
+            ['sudo', 'systemctl', 'poweroff', '--force', '--force'],
+            ['sudo', 'halt', '-f', '-p'],
+        ]
+
+        for cmd in commands:
+            try:
+                subprocess.Popen(cmd)
+                # close the app immediately so the WM doesn't keep focus weirdness
+                self.root.after(100, self.root.destroy)
+                return
+            except Exception:
+                pass
+
+        # last-resort status message if everything failed
         try:
-            subprocess.Popen(['sudo', 'poweroff', '-f'])
+            print("Poweroff command failed.")
         except:
-            for cmd in [['sudo', 'systemctl', 'poweroff', '--force'],
-                        ['sudo', 'halt', '-f', '-p']]:
-                try:
-                    subprocess.Popen(cmd)
-                    break
-                except:
-                    pass
+            pass
 
     def run(self):
         self.root.mainloop()
