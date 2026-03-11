@@ -1242,7 +1242,7 @@ class SyncScreen(BaseScreen):
         tf.pack(fill='both', expand=True, pady=10)
 
         self._notes_txt = tk.Text(tf,
-            font=(FONT_SANS, 14), bg=PANEL, fg=TEXT,
+            font=(FONT_SANS, 18), bg=PANEL, fg=TEXT,
             insertbackground=ACCENT, bd=0, relief='flat',
             wrap='word', height=6, padx=10, pady=8)
         self._notes_txt.pack(fill='both', expand=True)
@@ -1252,13 +1252,19 @@ class SyncScreen(BaseScreen):
 
         hint = tk.Frame(box, bg=BG)
         hint.pack(fill='x')
-        tk.Label(hint, text='Shift+Enter to continue (leave empty for \u201c*\u201d), or press Next \u25ba',
+        tk.Label(hint, text='Press Enter to continue (leave empty for \u201c*\u201d), or press Next \u25ba',
             font=(FONT_SANS, 11), bg=BG, fg=SUBTEXT).pack(anchor='w')
 
-        self._notes_txt.bind('<Shift-Return>', self._confirm_notes_key)
+        # Enter submits notes; Shift+Enter inserts a newline without advancing
+        self._notes_txt.bind('<Return>', self._confirm_notes_key)
+        self._notes_txt.bind('<Shift-Return>', self._newline_in_notes)
 
     def _confirm_notes_key(self, e):
         self._confirm_notes()
+        return 'break'
+
+    def _newline_in_notes(self, e):
+        self._notes_txt.insert('insert', '\n')
         return 'break'
 
     def _confirm_notes(self):
@@ -1557,11 +1563,11 @@ class App:
     def poweroff(self):
         """Immediate poweroff with several fallbacks for Puppy/Linux systems."""
         commands = [
-            ['poweroff', '-f'],
             ['busybox', 'poweroff', '-f'],
+            ['poweroff', '-f'],
+            ['/sbin/poweroff', '-f'],
             ['systemctl', 'poweroff', '--force', '--force'],
             ['halt', '-f', '-p'],
-            ['wmpoweroff'],
             ['sudo', 'poweroff', '-f'],
             ['sudo', 'systemctl', 'poweroff', '--force', '--force'],
             ['sudo', 'halt', '-f', '-p'],
