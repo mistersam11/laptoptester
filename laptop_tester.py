@@ -968,6 +968,9 @@ class KeyboardScreen(BaseScreen):
         # suppresses traversal — unlike bind_all which runs too late.
         self.app.root.bind_all('<KeyPress>',   self._key_down)
         self.app.root.bind_all('<KeyRelease>', self._key_up)
+        # Explicitly grab F10 so Tk doesn't treat it as a menu accelerator
+        self.app.root.bind('<F10>',            self._f10_down)
+        self.app.root.bind('<KeyRelease-F10>', self._f10_up)
         self._canvas.bind('<Tab>',          self._block_key)
         self._canvas.bind('<ISO_Left_Tab>', self._block_key)
         self._canvas.bind('<space>',        self._block_key)
@@ -983,11 +986,21 @@ class KeyboardScreen(BaseScreen):
         try:
             self.app.root.unbind_all('<KeyPress>')
             self.app.root.unbind_all('<KeyRelease>')
+            self.app.root.unbind('<F10>')
+            self.app.root.unbind('<KeyRelease-F10>')
             self._canvas.unbind('<Tab>')
             self._canvas.unbind('<ISO_Left_Tab>')
             self._canvas.unbind('<space>')
         except:
             pass
+
+    def _f10_down(self, ev):
+        self._key_down(ev)
+        return 'break'
+
+    def _f10_up(self, ev):
+        self._key_up(ev)
+        return 'break'
 
     def _key_down(self, ev):
         print("keysym =", ev.keysym, " keycode =", ev.keycode)
