@@ -1014,14 +1014,15 @@ class MARScreen(BaseScreen):
         return base / 'Install_DPK.bat'
 
     def _run_mar(self):
+        base = script_dir() / 'MARTOOLS'
         batch = self._find_mar_batch()
         if not batch:
-            self._status.set('Could not find MAR batch file in MARTOOLS folder.')
+            self._status.set(f'MARTOOLS folder not found. Looking in: {base}')
             self._status_lbl.config(fg=ERROR_C)
             return
 
         if not batch.exists():
-            self._status.set('Install_DPK.bat not found in MARTOOLS folder.')
+            self._status.set(f'Install_DPK.bat not found. Looking in: {batch}')
             self._status_lbl.config(fg=ERROR_C)
             return
 
@@ -1032,13 +1033,16 @@ class MARScreen(BaseScreen):
         self.app.root.attributes('-fullscreen', False)
         self.app.root.iconify()
 
+        CREATE_NO_WINDOW = 0x08000000
+
         def _ps_running():
             """Return True if a powershell process running run.ps1 is active."""
             try:
                 out = subprocess.check_output(
                     ['wmic', 'process', 'where',
                      "name='powershell.exe'", 'get', 'commandline', '/value'],
-                    text=True, stderr=subprocess.DEVNULL
+                    text=True, stderr=subprocess.DEVNULL,
+                    creationflags=CREATE_NO_WINDOW
                 )
                 return 'run.ps1' in out.lower()
             except Exception:
@@ -1047,8 +1051,8 @@ class MARScreen(BaseScreen):
         def worker():
             try:
                 creation_flags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
-                subprocess.Popen(
-                    [str(batch)],
+                proc = subprocess.Popen(
+                    str(batch),
                     cwd=str(batch.parent),
                     shell=True,
                     creationflags=creation_flags
@@ -1059,10 +1063,17 @@ class MARScreen(BaseScreen):
 
             # Wait for run.ps1 to appear (MAR has started)
             import time
+            started = False
             for _ in range(30):  # up to 30s for it to start
                 time.sleep(1)
                 if _ps_running():
+                    started = True
                     break
+
+            if not started:
+                err = f'MAR batch ran but run.ps1 never detected. Batch path: {batch}'
+                self.after(0, lambda: self._restore_and_update(False, err))
+                return
 
             # Now wait for run.ps1 to disappear (MAR has finished)
             while _ps_running():
