@@ -462,43 +462,18 @@ class NoisePlayer:
 
 def set_system_volume_40_percent_best_effort():
     """
-    Set system volume to 40% and unmute using PowerShell audio API.
+    Best-effort: simulate volume-up to ensure not muted.
+    Real CoreAudio integration is heavier; this is "good enough" and
+    fully self-contained.
     """
     try:
-        subprocess.run(
-            [
-                'powershell', '-NoProfile', '-Command',
-                '$obj = New-Object -ComObject WScript.Shell;'
-                '[void][System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms");'
-                # First unmute by sending volume up, then set exact level via API
-                '$a = New-Object -ComObject "Shell.Application";'
-                'Add-Type -TypeDefinition "'
-                'using System.Runtime.InteropServices;'
-                '[Guid(\"5CDF2C82-841E-4546-9722-0CF74078229A\"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]'
-                'public interface IAudioEndpointVolume {'
-                '  int f(); int g(); int h(); int i();'
-                '  int SetMasterVolumeLevelScalar(float fLevel, System.Guid pguidEventContext);'
-                '  int j(); int GetMasterVolumeLevelScalar(out float pfLevel);'
-                '  int k(); int l(); int m(); int n();'
-                '  int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, System.Guid pguidEventContext);'
-                '  int GetMute(out bool pbMute);'
-                '} '
-                '[Guid(\"D666063F-1587-4E43-81F1-B948E807363F\"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]'
-                'public interface IMMDevice { int Activate(ref System.Guid id, int clsCtx, int activationParams, out IAudioEndpointVolume aev); }'
-                '[Guid(\"A95664D2-9614-4F35-A746-DE8DB63617E6\"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]'
-                'public interface IMMDeviceEnumerator { int f(); int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint); }'
-                '[ComImport, Guid(\"BCDE0395-E52F-467C-8E3D-C4579291692E\")] public class MMDeviceEnumeratorComObject {}'
-                '";'
-                '$enumerator = [Activator]::CreateInstance([MMDeviceEnumeratorComObject]) -as [IMMDeviceEnumerator];'
-                '$dev = $null; [void]$enumerator.GetDefaultAudioEndpoint(0, 1, [ref]$dev);'
-                '$aevGuid = [System.Guid]"5CDF2C82-841E-4546-9722-0CF74078229A";'
-                '$aev = $null; [void]$dev.Activate([ref]$aevGuid, 23, 0, [ref]$aev);'
-                '[void]$aev.SetMasterVolumeLevelScalar(0.40, [System.Guid]::Empty);'
-                '[void]$aev.SetMute($false, [System.Guid]::Empty);'
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        for _ in range(5):
+            subprocess.run(
+                ['nircmd.exe', 'mutesysvolume', '0'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            break
     except Exception:
         pass
 
@@ -1077,13 +1052,21 @@ class MARScreen(BaseScreen):
         threading.Thread(target=worker, daemon=True).start()
 
     def _restore_and_update(self, ok, msg):
-        # Restore and re-assert fullscreen
-        self.app.root.deiconify()
-        self.app.root.attributes('-fullscreen', True)
-        self.app.root.attributes('-topmost', True)
-        self.app.root.lift()
-        self.app.root.focus_force()
         self._update_status(ok, msg)
+
+        def _do_restore():
+            self.app.root.deiconify()
+            self.app.root.attributes('-fullscreen', True)
+            self.app.root.attributes('-topmost', True)
+            self.app.root.lift()
+            self.app.root.focus_force()
+
+        # Fire immediately, then re-assert a few times to make sure it sticks
+        # after Windows finishes animating the console window closing
+        _do_restore()
+        self.app.root.after(300,  _do_restore)
+        self.app.root.after(700,  _do_restore)
+        self.app.root.after(1400, _do_restore)
 
     def _update_status(self, ok, msg):
         self._status.set(msg)
