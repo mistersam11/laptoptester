@@ -1064,8 +1064,9 @@ class MARScreen(BaseScreen):
         sh = self.app.root.winfo_screenheight()
         bar_h = 90
         self.app.root.attributes('-fullscreen', False)
-        self.app.root.attributes('-topmost', True)
+        self.app.root.attributes('-topmost', False)
         self.app.root.geometry(f'{sw}x{bar_h}+0+{sh - bar_h}')
+        self.app.root.lower()  # push tester behind MAR windows
 
     def _mar_done(self):
         self._run_btn.config(state='normal')
@@ -1463,6 +1464,9 @@ class App:
         self.root.attributes('-topmost', True)
 
         def _grab_focus(e=None):
+            # <Map> fires for every widget — only handle the root window itself
+            if e and str(e.widget) != '.':
+                return
             self.root.lift()
             self.root.focus_force()
 
