@@ -970,6 +970,8 @@ class MARScreen(BaseScreen):
     def __init__(self, parent, app):
         super().__init__(parent, app)
         self._status = tk.StringVar(value='')
+        self._done_btn = None
+        self._run_btn = None
         self._build()
 
     def _build(self):
@@ -980,16 +982,25 @@ class MARScreen(BaseScreen):
         center.pack(expand=True)
 
         tk.Label(center,
-                 text='Click Run MAR (or press Enter) to launch the MAR tool.\nThe tester will minimize while MAR runs, then restore when it finishes.',
+                 text='Click Run MAR (or press Enter) to launch the MAR tool.\nWhen MAR is finished, click "MAR Done" to restore the tester.',
                  font=(FONT_SANS, 14), bg=BG, fg=TEXT, justify='center').pack(pady=10)
 
-        btn = tk.Button(center, text='Run MAR',
+        self._run_btn = tk.Button(center, text='Run MAR',
                         font=(FONT_SANS, 22, 'bold'),
                         bg=ACCENT, fg='white',
                         activebackground='#58aef0', activeforeground='white',
                         bd=0, relief='flat', padx=40, pady=18, cursor='hand2',
                         command=self._run_mar)
-        btn.pack(pady=18)
+        self._run_btn.pack(pady=18)
+
+        self._done_btn = tk.Button(center, text='MAR Done',
+                        font=(FONT_SANS, 22, 'bold'),
+                        bg='#27ae60', fg='white',
+                        activebackground='#2ecc71', activeforeground='white',
+                        bd=0, relief='flat', padx=40, pady=18, cursor='hand2',
+                        command=self._mar_done,
+                        state='disabled')
+        self._done_btn.pack(pady=4)
 
         self._status_lbl = tk.Label(center, textvariable=self._status,
                                     font=(FONT_SANS, 13), bg=BG, fg=SUBTEXT,
@@ -999,6 +1010,10 @@ class MARScreen(BaseScreen):
     def on_show(self):
         self._status.set('')
         self._status_lbl.config(fg=SUBTEXT)
+        if self._run_btn:
+            self._run_btn.config(state='normal')
+        if self._done_btn:
+            self._done_btn.config(state='disabled')
         self.app.root.bind('<Return>', lambda e: self._run_mar())
 
     def on_hide(self):
@@ -1026,62 +1041,31 @@ class MARScreen(BaseScreen):
             self._status_lbl.config(fg=ERROR_C)
             return
 
-        self._status.set('MAR is running — tester will restore automatically when done…')
-        self._status_lbl.config(fg=WARNING)
+        try:
+            creation_flags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
+            subprocess.Popen(
+                str(batch),
+                cwd=str(batch.parent),
+                shell=True,
+                creationflags=creation_flags
+            )
+        except Exception as e:
+            self._status.set(f'Failed to launch MAR: {e}')
+            self._status_lbl.config(fg=ERROR_C)
+            return
 
-        # Minimize so MAR windows are fully visible
+        # Disable Run MAR, enable MAR Done, minimize
+        self._run_btn.config(state='disabled')
+        self._done_btn.config(state='normal')
+        self._status.set('MAR is running — click "MAR Done" when finished.')
+        self._status_lbl.config(fg=WARNING)
         self.app.root.attributes('-fullscreen', False)
         self.app.root.iconify()
 
-        CREATE_NO_WINDOW = 0x08000000
-
-        def _ps_running():
-            """Return True if a powershell process running run.ps1 is active."""
-            try:
-                out = subprocess.check_output(
-                    ['wmic', 'process', 'where',
-                     "name='powershell.exe'", 'get', 'commandline', '/value'],
-                    text=True, stderr=subprocess.DEVNULL,
-                    creationflags=CREATE_NO_WINDOW
-                )
-                return 'run.ps1' in out.lower()
-            except Exception:
-                return False
-
-        def worker():
-            try:
-                creation_flags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
-                proc = subprocess.Popen(
-                    str(batch),
-                    cwd=str(batch.parent),
-                    shell=True,
-                    creationflags=creation_flags
-                )
-            except Exception as e:
-                self.after(0, lambda: self._restore_and_update(False, f'Failed to launch MAR: {e}'))
-                return
-
-            # Wait for run.ps1 to appear (MAR has started)
-            import time
-            started = False
-            for _ in range(30):  # up to 30s for it to start
-                time.sleep(1)
-                if _ps_running():
-                    started = True
-                    break
-
-            if not started:
-                err = f'MAR batch ran but run.ps1 never detected. Batch path: {batch}'
-                self.after(0, lambda: self._restore_and_update(False, err))
-                return
-
-            # Now wait for run.ps1 to disappear (MAR has finished)
-            while _ps_running():
-                time.sleep(2)
-
-            self.after(0, lambda: self._restore_and_update(True, 'MAR completed successfully.'))
-
-        threading.Thread(target=worker, daemon=True).start()
+    def _mar_done(self):
+        self._run_btn.config(state='normal')
+        self._done_btn.config(state='disabled')
+        self._restore_and_update(True, 'MAR completed.')
 
     def _restore_and_update(self, ok, msg):
         self._update_status(ok, msg)
@@ -1451,15 +1435,15 @@ class App:
         self.root.configure(bg=BG)
         self.root.attributes('-fullscreen', True)
         self.root.attributes('-topmost', True)
-        self.root.focus_force()
 
-        def _reassert_fullscreen():
-            self.root.attributes('-fullscreen', True)
+        def _grab_focus():
             self.root.lift()
             self.root.focus_force()
 
-        self.root.after(200, _reassert_fullscreen)
-        self.root.after(800, _reassert_fullscreen)
+        # Delay focus until after window is fully rendered and visible
+        self.root.after(100, _grab_focus)
+        self.root.after(500, _grab_focus)
+        self.root.after(1200, _grab_focus)
 
         self.sw = self.root.winfo_screenwidth()
         self.sh = self.root.winfo_screenheight()
