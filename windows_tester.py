@@ -315,60 +315,29 @@ def get_system_info():
     except Exception:
         pass
 
-    # Battery health: use powercfg /batteryreport (same method as batteryreport.bat)
-    # This is the most reliable method across all laptop brands including ThinkPads.
+    # Battery health: try root\WMI namespace first (works on ThinkPads and
+    # most modern laptops where Win32_Battery returns 0 for capacity fields)
     design, full = 0, 0
-    _report_path = None
     try:
-        import tempfile
-        _report_path = os.path.join(tempfile.gettempdir(), 'tester_batteryreport.html')
-        subprocess.run(
-            ['powercfg', '/batteryreport', '/output', _report_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=15
+        def _ps(cmd):
+            out = subprocess.check_output(
+                ['powershell', '-NoProfile', '-Command', cmd],
+                text=True, stderr=subprocess.DEVNULL
+            )
+            return out.strip()
+
+        design_raw = _ps(
+            "(Get-WmiObject -Namespace root\\WMI -Class BatteryStaticData).DesignedCapacity"
         )
-        if os.path.exists(_report_path):
-            with open(_report_path, 'r', encoding='utf-8', errors='ignore') as f:
-                html = f.read()
-            # powercfg report stores capacities in mWh as plain numbers in table cells
-            # Design Capacity and Full Charge Capacity appear as the first two
-            # numeric capacity values in the report
-            capacity_values = re.findall(r'(\d[\d,]+)\s*mWh', html)
-            if len(capacity_values) >= 2:
-                design = int(capacity_values[0].replace(',', ''))
-                full   = int(capacity_values[1].replace(',', ''))
+        full_raw = _ps(
+            "(Get-WmiObject -Namespace root\\WMI -Class BatteryFullChargedCapacity).FullChargedCapacity"
+        )
+        design = int(design_raw.split()[0]) if design_raw else 0
+        full   = int(full_raw.split()[0])   if full_raw   else 0
     except Exception:
         pass
-    finally:
-        try:
-            if _report_path and os.path.exists(_report_path):
-                os.remove(_report_path)
-        except Exception:
-            pass
 
-    # Fallback 1: root\WMI namespace (works on many ThinkPads)
-    if design <= 0 or full <= 0:
-        try:
-            def _ps(cmd):
-                out = subprocess.check_output(
-                    ['powershell', '-NoProfile', '-Command', cmd],
-                    text=True, stderr=subprocess.DEVNULL
-                )
-                return out.strip()
-
-            design_raw = _ps(
-                "(Get-WmiObject -Namespace root\\WMI -Class BatteryStaticData).DesignedCapacity"
-            )
-            full_raw = _ps(
-                "(Get-WmiObject -Namespace root\\WMI -Class BatteryFullChargedCapacity).FullChargedCapacity"
-            )
-            design = int(design_raw.split()[0]) if design_raw else 0
-            full   = int(full_raw.split()[0])   if full_raw   else 0
-        except Exception:
-            pass
-
-    # Fallback 2: Win32_Battery capacity fields
+    # Fallback to Win32_Battery capacity fields if WMI query didn't work
     if design <= 0 or full <= 0:
         try:
             txt = _wmic([
@@ -1056,7 +1025,7 @@ class MARScreen(BaseScreen):
             self._status_lbl.config(fg=ERROR_C)
             return
 
-        self._status.set(f'Running {batch.name} — tester minimized while MAR is open…')
+        self._status.set(f'Running {batch.name} — close the MAR window when finished to return here…')
         self._status_lbl.config(fg=WARNING)
 
         # Minimize the tester window so MAR windows are fully visible
@@ -1068,10 +1037,12 @@ class MARScreen(BaseScreen):
             msg = ''
             try:
                 creation_flags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
+                # Use cmd /k so the console window stays open after the batch
+                # finishes — this way we only restore fullscreen once the user
+                # manually closes the window, not when the batch script exits.
                 r = subprocess.run(
-                    [str(batch)],
+                    ['cmd', '/k', str(batch)],
                     cwd=str(batch.parent),
-                    shell=True,
                     creationflags=creation_flags
                 )
                 ok = (r.returncode == 0)
