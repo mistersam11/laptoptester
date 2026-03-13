@@ -1054,13 +1054,18 @@ class MARScreen(BaseScreen):
             self._status_lbl.config(fg=ERROR_C)
             return
 
-        # Disable Run MAR, enable MAR Done, minimize
+        # Disable Run MAR, enable MAR Done
+        # Shrink tester to small bottom bar so MAR windows are fully visible
         self._run_btn.config(state='disabled')
         self._done_btn.config(state='normal')
         self._status.set('MAR is running — click "MAR Done" when finished.')
         self._status_lbl.config(fg=WARNING)
+        sw = self.app.root.winfo_screenwidth()
+        sh = self.app.root.winfo_screenheight()
+        bar_h = 90
         self.app.root.attributes('-fullscreen', False)
-        self.app.root.iconify()
+        self.app.root.attributes('-topmost', True)
+        self.app.root.geometry(f'{sw}x{bar_h}+0+{sh - bar_h}')
 
     def _mar_done(self):
         self._run_btn.config(state='normal')
@@ -1118,9 +1123,21 @@ class SyncScreen(BaseScreen):
     def on_show(self):
         self._step = self.STEP_IP
         self._render()
+        self.app._next_btn.config(
+            text='Sysprep  ▶',
+            bg='#c0392b', fg='white',
+            activebackground='#e74c3c', activeforeground='white',
+            command=self._run_sysprep
+        )
 
     def on_hide(self):
         self._unbind_grade_keys()
+        self.app._next_btn.config(
+            text='Next  ▶',
+            bg=PANEL, fg=TEXT,
+            activebackground=ACCENT, activeforeground='white',
+            command=self.app.next_screen
+        )
 
     def _clear(self):
         for w in self._content.winfo_children():
@@ -1384,6 +1401,15 @@ class SyncScreen(BaseScreen):
         self._last_msg = msg
         self._goto(self.STEP_DONE)
 
+    def _run_sysprep(self):
+        try:
+            subprocess.Popen(
+                [r'C:\Windows\System32\Sysprep\sysprep.exe', '/oobe', '/shutdown'],
+                creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
+            )
+        except Exception as e:
+            pass  # sysprep will handle its own UI
+
     def _show_done(self):
         ok = self._last_ok
         msg = self._last_msg
@@ -1436,14 +1462,12 @@ class App:
         self.root.attributes('-fullscreen', True)
         self.root.attributes('-topmost', True)
 
-        def _grab_focus():
+        def _grab_focus(e=None):
             self.root.lift()
             self.root.focus_force()
 
-        # Delay focus until after window is fully rendered and visible
-        self.root.after(100, _grab_focus)
-        self.root.after(500, _grab_focus)
-        self.root.after(1200, _grab_focus)
+        # <Map> fires when the window first becomes visible — most reliable way to grab focus
+        self.root.bind('<Map>', _grab_focus)
 
         self.sw = self.root.winfo_screenwidth()
         self.sh = self.root.winfo_screenheight()
