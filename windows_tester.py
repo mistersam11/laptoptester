@@ -1179,13 +1179,22 @@ class SyncScreen(BaseScreen):
     def _test_conn(self, ip):
         ok = False
         msg = ''
-        try:
-            s = socket.create_connection((ip, 5050), timeout=4)
-            s.close()
-            ok = True
-            msg = 'Connected!'
-        except Exception as e:
-            msg = 'Could not connect: ' + str(e)
+        attempts = 3
+        for attempt in range(attempts):
+            try:
+                if attempt > 0:
+                    self.after(0, lambda a=attempt: self._status(
+                        f'Retrying… (attempt {a + 1}/{attempts})', WARNING))
+                    import time; time.sleep(2)
+                r = req.get(f'http://{ip}:5050/ping', timeout=8)
+                if r.status_code == 200:
+                    ok = True
+                    msg = 'Connected!'
+                    break
+                else:
+                    msg = f'Server returned HTTP {r.status_code}'
+            except Exception as e:
+                msg = 'Could not connect: ' + str(e)
         self.after(0, lambda: self._ip_result(ip, ok, msg))
 
     def _ip_result(self, ip, ok, msg):
