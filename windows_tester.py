@@ -1025,29 +1025,50 @@ class MARScreen(BaseScreen):
             self._status_lbl.config(fg=ERROR_C)
             return
 
-        self._status.set(f'Running {batch.name} — tester minimized while MAR is open…')
+        self._status.set('MAR is running — tester will restore automatically when done…')
         self._status_lbl.config(fg=WARNING)
 
-        # Minimize the tester window so MAR windows are fully visible
+        # Minimize so MAR windows are fully visible
         self.app.root.attributes('-fullscreen', False)
         self.app.root.iconify()
 
+        def _ps_running():
+            """Return True if a powershell process running run.ps1 is active."""
+            try:
+                out = subprocess.check_output(
+                    ['wmic', 'process', 'where',
+                     "name='powershell.exe'", 'get', 'commandline', '/value'],
+                    text=True, stderr=subprocess.DEVNULL
+                )
+                return 'run.ps1' in out.lower()
+            except Exception:
+                return False
+
         def worker():
-            ok = False
-            msg = ''
             try:
                 creation_flags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
-                r = subprocess.run(
+                subprocess.Popen(
                     [str(batch)],
                     cwd=str(batch.parent),
                     shell=True,
                     creationflags=creation_flags
                 )
-                ok = (r.returncode == 0)
-                msg = 'MAR completed successfully.' if ok else f'MAR exited with code {r.returncode}.'
             except Exception as e:
-                msg = f'Failed to launch MAR: {e}'
-            self.after(0, lambda: self._restore_and_update(ok, msg))
+                self.after(0, lambda: self._restore_and_update(False, f'Failed to launch MAR: {e}'))
+                return
+
+            # Wait for run.ps1 to appear (MAR has started)
+            import time
+            for _ in range(30):  # up to 30s for it to start
+                time.sleep(1)
+                if _ps_running():
+                    break
+
+            # Now wait for run.ps1 to disappear (MAR has finished)
+            while _ps_running():
+                time.sleep(2)
+
+            self.after(0, lambda: self._restore_and_update(True, 'MAR completed successfully.'))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1061,8 +1082,6 @@ class MARScreen(BaseScreen):
             self.app.root.lift()
             self.app.root.focus_force()
 
-        # Fire immediately, then re-assert a few times to make sure it sticks
-        # after Windows finishes animating the console window closing
         _do_restore()
         self.app.root.after(300,  _do_restore)
         self.app.root.after(700,  _do_restore)
