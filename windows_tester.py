@@ -315,29 +315,60 @@ def get_system_info():
     except Exception:
         pass
 
-    # Battery health: try root\WMI namespace first (works on ThinkPads and
-    # most modern laptops where Win32_Battery returns 0 for capacity fields)
+    # Battery health: use powercfg /batteryreport (same method as batteryreport.bat)
+    # This is the most reliable method across all laptop brands including ThinkPads.
     design, full = 0, 0
+    _report_path = None
     try:
-        def _ps(cmd):
-            out = subprocess.check_output(
-                ['powershell', '-NoProfile', '-Command', cmd],
-                text=True, stderr=subprocess.DEVNULL
-            )
-            return out.strip()
-
-        design_raw = _ps(
-            "(Get-WmiObject -Namespace root\\WMI -Class BatteryStaticData).DesignedCapacity"
+        import tempfile
+        _report_path = os.path.join(tempfile.gettempdir(), 'tester_batteryreport.html')
+        subprocess.run(
+            ['powercfg', '/batteryreport', '/output', _report_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15
         )
-        full_raw = _ps(
-            "(Get-WmiObject -Namespace root\\WMI -Class BatteryFullChargedCapacity).FullChargedCapacity"
-        )
-        design = int(design_raw.split()[0]) if design_raw else 0
-        full   = int(full_raw.split()[0])   if full_raw   else 0
+        if os.path.exists(_report_path):
+            with open(_report_path, 'r', encoding='utf-8', errors='ignore') as f:
+                html = f.read()
+            # powercfg report stores capacities in mWh as plain numbers in table cells
+            # Design Capacity and Full Charge Capacity appear as the first two
+            # numeric capacity values in the report
+            capacity_values = re.findall(r'(\d[\d,]+)\s*mWh', html)
+            if len(capacity_values) >= 2:
+                design = int(capacity_values[0].replace(',', ''))
+                full   = int(capacity_values[1].replace(',', ''))
     except Exception:
         pass
+    finally:
+        try:
+            if _report_path and os.path.exists(_report_path):
+                os.remove(_report_path)
+        except Exception:
+            pass
 
-    # Fallback to Win32_Battery capacity fields if WMI query didn't work
+    # Fallback 1: root\WMI namespace (works on many ThinkPads)
+    if design <= 0 or full <= 0:
+        try:
+            def _ps(cmd):
+                out = subprocess.check_output(
+                    ['powershell', '-NoProfile', '-Command', cmd],
+                    text=True, stderr=subprocess.DEVNULL
+                )
+                return out.strip()
+
+            design_raw = _ps(
+                "(Get-WmiObject -Namespace root\\WMI -Class BatteryStaticData).DesignedCapacity"
+            )
+            full_raw = _ps(
+                "(Get-WmiObject -Namespace root\\WMI -Class BatteryFullChargedCapacity).FullChargedCapacity"
+            )
+            design = int(design_raw.split()[0]) if design_raw else 0
+            full   = int(full_raw.split()[0])   if full_raw   else 0
+        except Exception:
+            pass
+
+    # Fallback 2: Win32_Battery capacity fields
     if design <= 0 or full <= 0:
         try:
             txt = _wmic([
