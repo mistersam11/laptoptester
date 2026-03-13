@@ -71,9 +71,8 @@ SCREEN_TITLES = [
     'Camera Test',
     'Speaker Test',
     'Keyboard Test',
-    'System Info',
     'MAR',
-    'Sync',
+    'System Info',
 ]
 
 # ─── Persistent config on USB ──────────────────────────────────────────────────
@@ -960,6 +959,15 @@ class InfoScreen(BaseScreen):
             divider()
         row('Storage Size (AA)', info.get('storage_size', 'Unknown'))
 
+        btn_frame = tk.Frame(self, bg=BG)
+        btn_frame.pack(fill='x', side='bottom', pady=10, padx=14)
+        tk.Button(btn_frame, text='Exit  ✕',
+                  font=(FONT_SANS, 12, 'bold'),
+                  bg='#c0392b', fg='white',
+                  activebackground='#e74c3c', activeforeground='white',
+                  bd=0, relief='flat', padx=22, pady=10, cursor='hand2',
+                  command=self.app.quit_app).pack(side='right')
+
     def _retry(self):
         if self.app.system_info:
             self._build()
@@ -969,9 +977,7 @@ class InfoScreen(BaseScreen):
 class MARScreen(BaseScreen):
     def __init__(self, parent, app):
         super().__init__(parent, app)
-        self._status = tk.StringVar(value='')
-        self._done_btn = None
-        self._run_btn = None
+        self._overlay = None
         self._build()
 
     def _build(self):
@@ -982,39 +988,24 @@ class MARScreen(BaseScreen):
         center.pack(expand=True)
 
         tk.Label(center,
-                 text='Click Run MAR (or press Enter) to launch the MAR tool.\nWhen MAR is finished, click "MAR Done" to restore the tester.',
+                 text='Open the MARTOOLS folder and run MAR manually.\nWhen finished, click MAR Done.',
                  font=(FONT_SANS, 14), bg=BG, fg=TEXT, justify='center').pack(pady=10)
 
-        self._run_btn = tk.Button(center, text='Run MAR',
-                        font=(FONT_SANS, 22, 'bold'),
-                        bg=ACCENT, fg='white',
-                        activebackground='#58aef0', activeforeground='white',
-                        bd=0, relief='flat', padx=40, pady=18, cursor='hand2',
-                        command=self._run_mar)
-        self._run_btn.pack(pady=18)
+        tk.Button(center, text='Open MARTOOLS Folder',
+                  font=(FONT_SANS, 16),
+                  bg=ACCENT, fg='white',
+                  activebackground='#58aef0', activeforeground='white',
+                  bd=0, relief='flat', padx=30, pady=14, cursor='hand2',
+                  command=self._open_martools).pack(pady=14)
 
-        self._done_btn = tk.Button(center, text='MAR Done',
-                        font=(FONT_SANS, 22, 'bold'),
-                        bg='#27ae60', fg='white',
-                        activebackground='#2ecc71', activeforeground='white',
-                        bd=0, relief='flat', padx=40, pady=18, cursor='hand2',
-                        command=self._mar_done,
-                        state='disabled')
-        self._done_btn.pack(pady=4)
-
-        self._status_lbl = tk.Label(center, textvariable=self._status,
+        self._status_lbl = tk.Label(center, text='',
                                     font=(FONT_SANS, 13), bg=BG, fg=SUBTEXT,
                                     wraplength=520, justify='center')
-        self._status_lbl.pack(pady=10)
+        self._status_lbl.pack(pady=6)
 
     def on_show(self):
-        self._status.set('')
-        self._status_lbl.config(fg=SUBTEXT)
-        if self._run_btn:
-            self._run_btn.config(state='normal')
-        if self._done_btn:
-            self._done_btn.config(state='disabled')
-        self.app.root.bind('<Return>', lambda e: self._run_mar())
+        self._status_lbl.config(text='', fg=SUBTEXT)
+        self.app.root.bind('<Return>', lambda e: self._open_martools())
 
     def on_hide(self):
         try:
@@ -1022,75 +1013,54 @@ class MARScreen(BaseScreen):
         except Exception:
             pass
 
-    def _find_mar_batch(self) -> Path | None:
+    def _open_martools(self):
         base = script_dir() / 'MARTOOLS'
         if not base.is_dir():
-            return None
-        return base / 'Install_DPK.bat'
-
-    def _run_mar(self):
-        base = script_dir() / 'MARTOOLS'
-        batch = self._find_mar_batch()
-        if not batch:
-            self._status.set(f'MARTOOLS folder not found. Looking in: {base}')
-            self._status_lbl.config(fg=ERROR_C)
-            return
-
-        if not batch.exists():
-            self._status.set(f'Install_DPK.bat not found. Looking in: {batch}')
-            self._status_lbl.config(fg=ERROR_C)
+            self._status_lbl.config(
+                text=f'MARTOOLS folder not found at: {base}', fg=ERROR_C)
             return
 
         try:
-            creation_flags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
-            subprocess.Popen(
-                str(batch),
-                cwd=str(batch.parent),
-                shell=True,
-                creationflags=creation_flags
-            )
+            subprocess.Popen(['explorer', str(base)])
         except Exception as e:
-            self._status.set(f'Failed to launch MAR: {e}')
-            self._status_lbl.config(fg=ERROR_C)
+            self._status_lbl.config(text=f'Could not open folder: {e}', fg=ERROR_C)
             return
 
-        # Disable Run MAR, enable MAR Done
-        # Shrink tester to small bottom bar so MAR windows are fully visible
-        self._run_btn.config(state='disabled')
-        self._done_btn.config(state='normal')
-        self._status.set('MAR is running — click "MAR Done" when finished.')
-        self._status_lbl.config(fg=WARNING)
+        # Shrink tester to small floating window filled by MAR Done button
         sw = self.app.root.winfo_screenwidth()
         sh = self.app.root.winfo_screenheight()
-        bar_h = 90
+        win_w, win_h = 320, 120
+        x = sw - win_w - 20
+        y = sh - win_h - 60
         self.app.root.attributes('-fullscreen', False)
-        self.app.root.attributes('-topmost', False)
-        self.app.root.geometry(f'{sw}x{bar_h}+0+{sh - bar_h}')
-        self.app.root.lower()  # push tester behind MAR windows
+        self.app.root.attributes('-topmost', True)
+        self.app.root.geometry(f'{win_w}x{win_h}+{x}+{y}')
+
+        # Hide all normal UI, show a green MAR Done button filling the window
+        for w in self.app.root.winfo_children():
+            w.pack_forget()
+        self._overlay = tk.Frame(self.app.root, bg='#27ae60')
+        self._overlay.pack(fill='both', expand=True)
+        tk.Button(self._overlay, text='MAR Done',
+                  font=(FONT_SANS, 18, 'bold'),
+                  bg='#27ae60', fg='white',
+                  activebackground='#2ecc71', activeforeground='white',
+                  bd=0, relief='flat', cursor='hand2',
+                  command=self._mar_done).pack(fill='both', expand=True)
 
     def _mar_done(self):
-        self._run_btn.config(state='normal')
-        self._done_btn.config(state='disabled')
-        self._restore_and_update(True, 'MAR completed.')
-
-    def _restore_and_update(self, ok, msg):
-        self._update_status(ok, msg)
-
-        def _do_restore():
-            self.app.root.deiconify()
-            self.app.root.attributes('-fullscreen', True)
-            self.app.root.attributes('-topmost', True)
-            self.app.root.lift()
-            self.app.root.focus_force()
-
-        _do_restore()
-        self.app.root.after(300,  _do_restore)
-        self.app.root.after(700,  _do_restore)
-        self.app.root.after(1400, _do_restore)
-
-    def _update_status(self, ok, msg):
-        self._status.set(msg)
-        self._status_lbl.config(fg=SUCCESS if ok else ERROR_C)
+        try:
+            self._overlay.destroy()
+            self._overlay = None
+        except Exception:
+            pass
+        # Restore fullscreen and go to next screen (Info)
+        self.app.root.attributes('-fullscreen', True)
+        self.app.root.attributes('-topmost', True)
+        self.app.root.lift()
+        self.app.root.focus_force()
+        self.app._rebuild_ui()
+        self.app.next_screen()
 
 # ─── Screen 6: Sync ────────────────────────────────────────────────────────────
 
@@ -1576,15 +1546,13 @@ class App:
         if self.mode == 'desktop':
             self._screens = [
                 SpeakerScreen(self._area, self),
-                InfoScreen(self._area, self),
                 MARScreen(self._area, self),
-                SyncScreen(self._area, self),
+                InfoScreen(self._area, self),
             ]
             self._screen_titles = [
                 'Speaker Test',
-                'System Info',
                 'MAR',
-                'Sync',
+                'System Info',
             ]
         else:
             self.mode = 'laptop'
@@ -1592,14 +1560,24 @@ class App:
                 CameraScreen(self._area, self),
                 SpeakerScreen(self._area, self),
                 KeyboardScreen(self._area, self),
-                InfoScreen(self._area, self),
                 MARScreen(self._area, self),
-                SyncScreen(self._area, self),
+                InfoScreen(self._area, self),
             ]
             self._screen_titles = SCREEN_TITLES[:]
 
         self.root.bind('<Shift-Right>', lambda e: self.next_screen())
         self.root.bind('<Shift-Left>',  lambda e: self.prev_screen())
+
+    def _rebuild_ui(self):
+        # Rebuild the full app UI after MAR overlay destroys it
+        for w in self.root.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._active = None
+        self._build_ui()
+        self._show(self._idx)
 
     def _show(self, idx):
         if self._active:
