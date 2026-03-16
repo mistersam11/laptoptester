@@ -536,7 +536,7 @@ KB_ALIAS = {
 
 class BaseScreen(tk.Frame):
     def __init__(self, parent, app):
-        super().__init__(parent, bg=BG)
+        super().__init__(parent, bg=BG, takefocus=1)
         self.app = app
 
     def on_show(self):
@@ -572,11 +572,14 @@ class CameraScreen(BaseScreen):
         self._running = False
         self._lbl = None
         self._container = None
+        self._focus_anchor = None
         self._build()
 
     def _build(self):
         tk.Label(self, text='CAMERA TEST', font=(FONT_SANS, 11, 'bold'),
                  bg=BG, fg=SUBTEXT).pack(pady=(14, 6))
+        self._focus_anchor = tk.Frame(self, bg=BG, width=1, height=1, takefocus=1)
+        self._focus_anchor.pack()
         self._container = tk.Frame(self, bg='black')
         self._container.pack(expand=True, fill='both', padx=30, pady=(0, 20))
         self._container.pack_propagate(False)
@@ -586,6 +589,7 @@ class CameraScreen(BaseScreen):
             w.destroy()
         self._running = False
         self._lbl = None
+        self.after(1, self._focus_camera_screen)
 
         if not HAS_CAMERA:
             tk.Label(self._container,
@@ -623,6 +627,20 @@ class CameraScreen(BaseScreen):
             self._lbl.image = photo
         self.after(40, self._tick)
 
+    def focus_target(self):
+        return self._focus_anchor or self
+
+    def _focus_camera_screen(self):
+        try:
+            if self._focus_anchor and self._focus_anchor.winfo_exists():
+                self._focus_anchor.focus_force()
+                self._focus_anchor.focus_set()
+            else:
+                self.focus_force()
+                self.focus_set()
+        except Exception:
+            pass
+
     def on_hide(self):
         self._running = False
         if self._cap:
@@ -635,6 +653,7 @@ class SpeakerScreen(BaseScreen):
     def __init__(self, parent, app):
         super().__init__(parent, app)
         self._noise = NoisePlayer()
+        self._toggle_btn = None
         self._build()
 
     def _build(self):
@@ -658,6 +677,15 @@ class SpeakerScreen(BaseScreen):
                              font=(FONT_SANS, 14), bg=BG, fg=SUBTEXT)
         self._sub.pack(pady=8)
 
+        self._toggle_btn = NoMouseButton(center,
+                              text='Toggle Speakers (Space)',
+                              font=(FONT_SANS, 16, 'bold'),
+                              bg=ACCENT, fg='white',
+                              activebackground='#58aef0', activeforeground='white',
+                              bd=0, relief='flat', padx=26, pady=12,
+                              cursor='hand2', command=self._toggle)
+        self._toggle_btn.pack(pady=(10, 0))
+
         if not HAS_AUDIO:
             tk.Label(center,
                      text='⚠ audio libraries not available\n(bundle sounddevice + numpy into EXE)',
@@ -670,16 +698,30 @@ class SpeakerScreen(BaseScreen):
         self._sub.config(text='')
         set_system_volume_40_percent_best_effort()
         self.app.root.bind_all('<KeyPress-space>', self._toggle)
+        self.app.root.bind_all('<space>', self._toggle)
+        self.after(1, self._focus_speaker_screen)
 
     def on_hide(self):
         self._noise.stop()
         try:
             self.app.root.unbind_all('<KeyPress-space>')
+            self.app.root.unbind_all('<space>')
         except Exception:
             pass
 
     def focus_target(self):
-        return self
+        return self._toggle_btn or self
+
+    def _focus_speaker_screen(self):
+        try:
+            if self._toggle_btn and self._toggle_btn.winfo_exists():
+                self._toggle_btn.focus_force()
+                self._toggle_btn.focus_set()
+            else:
+                self.focus_force()
+                self.focus_set()
+        except Exception:
+            pass
 
     def _toggle(self, _=None):
         if self._noise.is_playing():
@@ -1081,7 +1123,7 @@ class MARScreen(BaseScreen):
         win_w, win_h = 320, 120
         x = sw - win_w - 20
         y = sh - win_h - 60
-        self.app.root.attributes('-fullscreen', False)
+        self.app._leave_borderless_fullscreen()
         self.app.root.attributes('-topmost', True)
         self.app.root.geometry(f'{win_w}x{win_h}+{x}+{y}')
 
@@ -1113,7 +1155,7 @@ class MARScreen(BaseScreen):
         except Exception:
             pass
         # Restore fullscreen and go to next screen (Info)
-        self.app.root.attributes('-fullscreen', True)
+        self.app._enter_borderless_fullscreen()
         self.app.root.attributes('-topmost', True)
         self.app.root.lift()
         self.app.root.focus_force()
@@ -1494,8 +1536,7 @@ class SyncScreen(BaseScreen):
 class App:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.withdraw()
-        self.root.title('Windows Laptop / PC Tester')
+        self.root.title('CSAD Windows Tester')
         self.root.configure(bg=BG)
         self.root.attributes('-topmost', True)
 
@@ -1508,24 +1549,125 @@ class App:
         self.mode = detect_machine_mode()
         self._screen_titles = []
         self._focus_job = None
+        self._focus_jobs = []
+        self._screens = []
+        self._screen_builders = []
+        self._startup_box = None
+        self._kiosk_enabled = False
+
+        # Start in a normal maximized window first. This is usually much less
+        # flickery on Windows than going straight into overrideredirect
+        # fullscreen before the window is really alive.
+        self.root.geometry('900x600+60+40')
+        try:
+            self.root.state('zoomed')
+        except Exception:
+            self.root.geometry(f'{self.sw}x{self.sh}+0+0')
 
         threading.Thread(target=self._load_info, daemon=True).start()
 
         self._build_ui()
-        self._apply_fullscreen()
-        self._show(0)
+        self._init_screen_builders()
+        self._show_startup_placeholder()
         self.root.update_idletasks()
-        self.root.deiconify()
-        self._schedule_focus_boost()
+        self.root.after(30, self._raise_startup_window)
+        self.root.after(180, self._finish_startup)
+        self.root.after(650, self._enter_kiosk_mode)
+
+    def _init_screen_builders(self):
+        if self.mode == 'desktop':
+            self._screen_titles = [
+                'Speaker Test',
+                'MAR',
+                'System Info',
+            ]
+            self._screen_builders = [
+                lambda: SpeakerScreen(self._area, self),
+                lambda: MARScreen(self._area, self),
+                lambda: InfoScreen(self._area, self),
+            ]
+        else:
+            self.mode = 'laptop'
+            self._screen_titles = SCREEN_TITLES[:]
+            self._screen_builders = [
+                lambda: CameraScreen(self._area, self),
+                lambda: SpeakerScreen(self._area, self),
+                lambda: KeyboardScreen(self._area, self),
+                lambda: MARScreen(self._area, self),
+                lambda: InfoScreen(self._area, self),
+            ]
+        self._screens = [None] * len(self._screen_builders)
+
+    def _get_screen(self, idx):
+        scr = self._screens[idx]
+        if scr is None:
+            scr = self._screen_builders[idx]()
+            self._screens[idx] = scr
+        return scr
 
     def _load_info(self):
         self.system_info = get_system_info()
 
-    def _apply_fullscreen(self):
+    def _raise_startup_window(self):
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self.root.focus_set()
+        except Exception:
+            pass
+
+    def _show_startup_placeholder(self):
+        self._startup_box = tk.Frame(self._area, bg=BG)
+        self._startup_box.pack(fill='both', expand=True)
+        tk.Label(
+            self._startup_box,
+            text='Starting tester…',
+            font=(FONT_SANS, 24, 'bold'),
+            bg=BG,
+            fg=TEXT
+        ).pack(expand=True)
+
+    def _finish_startup(self):
+        try:
+            if self._startup_box and self._startup_box.winfo_exists():
+                self._startup_box.destroy()
+        except Exception:
+            pass
+        self._show(0)
+        self._schedule_focus_boost()
+
+    def _enter_kiosk_mode(self):
+        if self._kiosk_enabled:
+            return
+        self._kiosk_enabled = True
+        try:
+            self.root.overrideredirect(True)
+        except Exception:
+            pass
         self.root.geometry(f'{self.sw}x{self.sh}+0+0')
-        self.root.attributes('-fullscreen', True)
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+        self._schedule_focus_boost()
+
+    def _leave_borderless_fullscreen(self):
+        self._kiosk_enabled = False
+        try:
+            self.root.overrideredirect(False)
+        except Exception:
+            pass
         self.root.attributes('-topmost', True)
-        self.root.lift()
+
+    def _enter_borderless_fullscreen(self):
+        try:
+            self.root.state('normal')
+        except Exception:
+            pass
+        self.root.geometry(f'{self.sw}x{self.sh}+0+0')
+        self.root.after(10, self._enter_kiosk_mode)
 
     def _schedule_focus_boost(self):
         if self._focus_job:
@@ -1533,7 +1675,16 @@ class App:
                 self.root.after_cancel(self._focus_job)
             except Exception:
                 pass
-        self._focus_job = self.root.after(1, self._focus_active_widget)
+        for job in self._focus_jobs:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._focus_jobs = []
+        delays = (1, 50, 120, 250, 450, 800, 1200)
+        self._focus_job = self.root.after(delays[0], self._focus_active_widget)
+        for d in delays[1:]:
+            self._focus_jobs.append(self.root.after(d, self._focus_active_widget))
 
     def _focus_active_widget(self):
         try:
@@ -1543,7 +1694,10 @@ class App:
             if self._active and hasattr(self._active, 'focus_target'):
                 target = self._active.focus_target()
             if target and target.winfo_exists():
-                target.focus_force()
+                try:
+                    target.focus_force()
+                except Exception:
+                    pass
                 try:
                     target.focus_set()
                 except Exception:
@@ -1637,28 +1791,6 @@ class App:
         self._area = tk.Frame(self.root, bg=BG)
         self._area.pack(fill='both', expand=True)
 
-        if self.mode == 'desktop':
-            self._screens = [
-                SpeakerScreen(self._area, self),
-                MARScreen(self._area, self),
-                InfoScreen(self._area, self),
-            ]
-            self._screen_titles = [
-                'Speaker Test',
-                'MAR',
-                'System Info',
-            ]
-        else:
-            self.mode = 'laptop'
-            self._screens = [
-                CameraScreen(self._area, self),
-                SpeakerScreen(self._area, self),
-                KeyboardScreen(self._area, self),
-                MARScreen(self._area, self),
-                InfoScreen(self._area, self),
-            ]
-            self._screen_titles = SCREEN_TITLES[:]
-
         self.root.bind('<Shift-Right>', lambda e: self.next_screen())
         self.root.bind('<Shift-Left>',  lambda e: self.prev_screen())
         self.root.bind('<F6>', lambda e: self.prev_screen())
@@ -1681,7 +1813,7 @@ class App:
             self._active.pack_forget()
 
         self._idx = idx
-        scr = self._screens[idx]
+        scr = self._get_screen(idx)
         scr.pack(fill='both', expand=True)
         scr.on_show()
         self._active = scr
