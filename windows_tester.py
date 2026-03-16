@@ -631,8 +631,8 @@ class SpeakerScreen(BaseScreen):
         self._icon.pack(pady=(0, 18))
 
         self._prompt = tk.Label(center,
-                                text='Press  Spacebar  to Test Speakers',
-                                font=(FONT_SANS, 26, 'bold'),
+                                text='Press  Spacebar  or click the button to test speakers',
+                                font=(FONT_SANS, 22, 'bold'),
                                 bg=BG, fg=TEXT)
         self._prompt.pack()
 
@@ -640,22 +640,17 @@ class SpeakerScreen(BaseScreen):
                              font=(FONT_SANS, 14), bg=BG, fg=SUBTEXT)
         self._sub.pack(pady=8)
 
-        self._toggle_btn = tk.Button(
+        # Large clickable button so the speaker test works without a keyboard
+        self._btn = tk.Button(
             center,
-            text='Start Noise',
+            text='▶  Play White Noise',
             font=(FONT_SANS, 16, 'bold'),
-            bg=ACCENT,
-            fg='white',
-            activebackground='#58aef0',
-            activeforeground='white',
-            bd=0,
-            relief='flat',
-            padx=24,
-            pady=12,
-            cursor='hand2',
+            bg=ACCENT, fg='white',
+            activebackground='#58aef0', activeforeground='white',
+            bd=0, relief='flat', padx=32, pady=14, cursor='hand2',
             command=self._toggle,
         )
-        self._toggle_btn.pack(pady=(8, 0))
+        self._btn.pack(pady=(4, 0))
 
         if not HAS_AUDIO:
             tk.Label(center,
@@ -664,10 +659,10 @@ class SpeakerScreen(BaseScreen):
 
     def on_show(self):
         self._noise.stop()
-        self._prompt.config(text='Press  Spacebar  to Test Speakers', fg=TEXT)
+        self._prompt.config(text='Press  Spacebar  or click the button to test speakers', fg=TEXT)
         self._icon.config(fg=SUBTEXT)
         self._sub.config(text='')
-        self._toggle_btn.config(text='Start Noise', bg=ACCENT, activebackground='#58aef0')
+        self._btn.config(text='▶  Play White Noise', bg=ACCENT)
         set_system_volume_40_percent_best_effort()
         self.app.root.bind('<space>', self._toggle)
 
@@ -681,16 +676,16 @@ class SpeakerScreen(BaseScreen):
     def _toggle(self, _=None):
         if self._noise.is_playing():
             self._noise.stop()
-            self._prompt.config(text='Press  Spacebar  to Test Speakers', fg=TEXT)
+            self._prompt.config(text='Press  Spacebar  or click the button to test speakers', fg=TEXT)
             self._icon.config(fg=SUBTEXT)
             self._sub.config(text='')
-            self._toggle_btn.config(text='Start Noise', bg=ACCENT, activebackground='#58aef0')
+            self._btn.config(text='▶  Play White Noise', bg=ACCENT)
         else:
             self._noise.start(vol=0.4)
             self._prompt.config(text='Playing...', fg=SUCCESS)
             self._icon.config(fg=SUCCESS)
-            self._sub.config(text='Press Spacebar again to stop')
-            self._toggle_btn.config(text='Stop Noise', bg='#2f7d32', activebackground='#3f9a43')
+            self._sub.config(text='Press Spacebar or click again to stop')
+            self._btn.config(text='■  Stop', bg='#555')
 
 # ─── Screen 3: Keyboard ────────────────────────────────────────────────────────
 
@@ -1008,15 +1003,15 @@ class MARScreen(BaseScreen):
         center.pack(expand=True)
 
         tk.Label(center,
-                 text='Run Install_DPK.bat from MARTOOLS.\nWhen finished, click MAR Done.',
+                 text='Click the button below to run Install_DPK.bat.\nWhen finished, click MAR Done.',
                  font=(FONT_SANS, 14), bg=BG, fg=TEXT, justify='center').pack(pady=10)
 
-        tk.Button(center, text='Run MAR Installer',
+        tk.Button(center, text='Run Install_DPK.bat',
                   font=(FONT_SANS, 16),
                   bg=ACCENT, fg='white',
                   activebackground='#58aef0', activeforeground='white',
                   bd=0, relief='flat', padx=30, pady=14, cursor='hand2',
-                  command=self._run_mar_installer).pack(pady=14)
+                  command=self._open_martools).pack(pady=14)
 
         self._status_lbl = tk.Label(center, text='',
                                     font=(FONT_SANS, 13), bg=BG, fg=SUBTEXT,
@@ -1025,7 +1020,7 @@ class MARScreen(BaseScreen):
 
     def on_show(self):
         self._status_lbl.config(text='', fg=SUBTEXT)
-        self.app.root.bind('<Return>', lambda e: self._run_mar_installer())
+        self.app.root.bind('<Return>', lambda e: self._open_martools())
 
     def on_hide(self):
         try:
@@ -1033,22 +1028,21 @@ class MARScreen(BaseScreen):
         except Exception:
             pass
 
-    def _run_mar_installer(self):
-        base = script_dir() / 'MARTOOLS'
-        installer = base / 'Install_DPK.bat'
-        if not installer.is_file():
+    def _open_martools(self):
+        bat = script_dir() / 'MARTOOLS' / 'Install_DPK.bat'
+        if not bat.is_file():
             self._status_lbl.config(
-                text=f'Install_DPK.bat not found at: {installer}', fg=ERROR_C)
+                text=f'Install_DPK.bat not found at: {bat}', fg=ERROR_C)
             return
 
         try:
             subprocess.Popen(
-                [str(installer)],
-                cwd=str(base),
-                shell=True,
+                ['cmd', '/c', str(bat)],
+                cwd=str(bat.parent),
+                creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0),
             )
         except Exception as e:
-            self._status_lbl.config(text=f'Could not run Install_DPK.bat: {e}', fg=ERROR_C)
+            self._status_lbl.config(text=f'Could not run bat: {e}', fg=ERROR_C)
             return
 
         # Shrink tester to small floating window filled by MAR Done button
@@ -1458,6 +1452,11 @@ class App:
         self.root.attributes('-fullscreen', True)
         self.root.attributes('-topmost', True)
 
+        # Grab focus once after the window has fully rendered.
+        # Using <Map> was causing the EXE to flicker because it fires for
+        # every child widget (dozens of times), triggering repeated lift/focus calls.
+        self.root.after(150, lambda: (self.root.lift(), self.root.focus_force()))
+
         self.sw = self.root.winfo_screenwidth()
         self.sh = self.root.winfo_screenheight()
 
@@ -1471,26 +1470,6 @@ class App:
 
         self._build_ui()
         self._show(0)
-        self._focus_attempts = 0
-        self.root.after(100, self._force_focus_startup)
-
-    def _force_focus_startup(self):
-        """Stabilize startup focus without repeated map/unmap flicker."""
-        try:
-            self.root.lift()
-            self.root.focus_force()
-        except Exception:
-            pass
-
-        self._focus_attempts += 1
-        if self._focus_attempts < 10:
-            self.root.after(200, self._force_focus_startup)
-        elif self._focus_attempts == 10:
-            # Release top-most pin after startup so tester doesn't fight other windows.
-            try:
-                self.root.attributes('-topmost', False)
-            except Exception:
-                pass
 
     def _load_info(self):
         self.system_info = get_system_info()
@@ -1624,6 +1603,10 @@ class App:
         scr.pack(fill='both', expand=True)
         scr.on_show()
         self._active = scr
+
+        # Ensure the root window always has keyboard focus after a screen transition.
+        # Without this the user has to click before keyboard events are received.
+        self.root.after(50, lambda: self.root.focus_force())
 
         title = self._screen_titles[idx] if idx < len(self._screen_titles) else ''
         self._title_lbl.config(text=f'{title}  ·  {idx + 1} / {len(self._screens)}')
