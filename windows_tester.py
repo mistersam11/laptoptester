@@ -640,6 +640,23 @@ class SpeakerScreen(BaseScreen):
                              font=(FONT_SANS, 14), bg=BG, fg=SUBTEXT)
         self._sub.pack(pady=8)
 
+        self._toggle_btn = tk.Button(
+            center,
+            text='Start Noise',
+            font=(FONT_SANS, 16, 'bold'),
+            bg=ACCENT,
+            fg='white',
+            activebackground='#58aef0',
+            activeforeground='white',
+            bd=0,
+            relief='flat',
+            padx=24,
+            pady=12,
+            cursor='hand2',
+            command=self._toggle,
+        )
+        self._toggle_btn.pack(pady=(8, 0))
+
         if not HAS_AUDIO:
             tk.Label(center,
                      text='⚠ audio libraries not available\n(bundle sounddevice + numpy into EXE)',
@@ -650,6 +667,7 @@ class SpeakerScreen(BaseScreen):
         self._prompt.config(text='Press  Spacebar  to Test Speakers', fg=TEXT)
         self._icon.config(fg=SUBTEXT)
         self._sub.config(text='')
+        self._toggle_btn.config(text='Start Noise', bg=ACCENT, activebackground='#58aef0')
         set_system_volume_40_percent_best_effort()
         self.app.root.bind('<space>', self._toggle)
 
@@ -666,11 +684,13 @@ class SpeakerScreen(BaseScreen):
             self._prompt.config(text='Press  Spacebar  to Test Speakers', fg=TEXT)
             self._icon.config(fg=SUBTEXT)
             self._sub.config(text='')
+            self._toggle_btn.config(text='Start Noise', bg=ACCENT, activebackground='#58aef0')
         else:
             self._noise.start(vol=0.4)
             self._prompt.config(text='Playing...', fg=SUCCESS)
             self._icon.config(fg=SUCCESS)
             self._sub.config(text='Press Spacebar again to stop')
+            self._toggle_btn.config(text='Stop Noise', bg='#2f7d32', activebackground='#3f9a43')
 
 # ─── Screen 3: Keyboard ────────────────────────────────────────────────────────
 
@@ -988,15 +1008,15 @@ class MARScreen(BaseScreen):
         center.pack(expand=True)
 
         tk.Label(center,
-                 text='Open the MARTOOLS folder and run MAR manually.\nWhen finished, click MAR Done.',
+                 text='Run Install_DPK.bat from MARTOOLS.\nWhen finished, click MAR Done.',
                  font=(FONT_SANS, 14), bg=BG, fg=TEXT, justify='center').pack(pady=10)
 
-        tk.Button(center, text='Open MARTOOLS Folder',
+        tk.Button(center, text='Run MAR Installer',
                   font=(FONT_SANS, 16),
                   bg=ACCENT, fg='white',
                   activebackground='#58aef0', activeforeground='white',
                   bd=0, relief='flat', padx=30, pady=14, cursor='hand2',
-                  command=self._open_martools).pack(pady=14)
+                  command=self._run_mar_installer).pack(pady=14)
 
         self._status_lbl = tk.Label(center, text='',
                                     font=(FONT_SANS, 13), bg=BG, fg=SUBTEXT,
@@ -1005,7 +1025,7 @@ class MARScreen(BaseScreen):
 
     def on_show(self):
         self._status_lbl.config(text='', fg=SUBTEXT)
-        self.app.root.bind('<Return>', lambda e: self._open_martools())
+        self.app.root.bind('<Return>', lambda e: self._run_mar_installer())
 
     def on_hide(self):
         try:
@@ -1013,17 +1033,22 @@ class MARScreen(BaseScreen):
         except Exception:
             pass
 
-    def _open_martools(self):
+    def _run_mar_installer(self):
         base = script_dir() / 'MARTOOLS'
-        if not base.is_dir():
+        installer = base / 'Install_DPK.bat'
+        if not installer.is_file():
             self._status_lbl.config(
-                text=f'MARTOOLS folder not found at: {base}', fg=ERROR_C)
+                text=f'Install_DPK.bat not found at: {installer}', fg=ERROR_C)
             return
 
         try:
-            subprocess.Popen(['explorer', str(base)])
+            subprocess.Popen(
+                [str(installer)],
+                cwd=str(base),
+                shell=True,
+            )
         except Exception as e:
-            self._status_lbl.config(text=f'Could not open folder: {e}', fg=ERROR_C)
+            self._status_lbl.config(text=f'Could not run Install_DPK.bat: {e}', fg=ERROR_C)
             return
 
         # Shrink tester to small floating window filled by MAR Done button
@@ -1433,16 +1458,6 @@ class App:
         self.root.attributes('-fullscreen', True)
         self.root.attributes('-topmost', True)
 
-        def _grab_focus(e=None):
-            # <Map> fires for every widget — only handle the root window itself
-            if e and str(e.widget) != '.':
-                return
-            self.root.lift()
-            self.root.focus_force()
-
-        # <Map> fires when the window first becomes visible — most reliable way to grab focus
-        self.root.bind('<Map>', _grab_focus)
-
         self.sw = self.root.winfo_screenwidth()
         self.sh = self.root.winfo_screenheight()
 
@@ -1456,6 +1471,26 @@ class App:
 
         self._build_ui()
         self._show(0)
+        self._focus_attempts = 0
+        self.root.after(100, self._force_focus_startup)
+
+    def _force_focus_startup(self):
+        """Stabilize startup focus without repeated map/unmap flicker."""
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+
+        self._focus_attempts += 1
+        if self._focus_attempts < 10:
+            self.root.after(200, self._force_focus_startup)
+        elif self._focus_attempts == 10:
+            # Release top-most pin after startup so tester doesn't fight other windows.
+            try:
+                self.root.attributes('-topmost', False)
+            except Exception:
+                pass
 
     def _load_info(self):
         self.system_info = get_system_info()
