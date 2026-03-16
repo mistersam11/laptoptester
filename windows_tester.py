@@ -536,7 +536,7 @@ KB_ALIAS = {
 
 class BaseScreen(tk.Frame):
     def __init__(self, parent, app):
-        super().__init__(parent, bg=BG, takefocus=1)
+        super().__init__(parent, bg=BG)
         self.app = app
 
     def on_show(self):
@@ -544,24 +544,6 @@ class BaseScreen(tk.Frame):
 
     def on_hide(self):
         pass
-
-    def focus_target(self):
-        return None
-
-
-class NoMouseButton(tk.Button):
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault('takefocus', 1)
-        super().__init__(*args, **kwargs)
-        self.bind('<Return>', self._invoke_from_key)
-        self.bind('<KP_Enter>', self._invoke_from_key)
-        self.bind('<space>', self._invoke_from_key)
-
-    def _invoke_from_key(self, _=None):
-        try:
-            self.invoke()
-        finally:
-            return 'break'
 
 # ─── Screen 1: Camera ──────────────────────────────────────────────────────────
 
@@ -572,14 +554,11 @@ class CameraScreen(BaseScreen):
         self._running = False
         self._lbl = None
         self._container = None
-        self._focus_anchor = None
         self._build()
 
     def _build(self):
         tk.Label(self, text='CAMERA TEST', font=(FONT_SANS, 11, 'bold'),
                  bg=BG, fg=SUBTEXT).pack(pady=(14, 6))
-        self._focus_anchor = tk.Frame(self, bg=BG, width=1, height=1, takefocus=1)
-        self._focus_anchor.pack()
         self._container = tk.Frame(self, bg='black')
         self._container.pack(expand=True, fill='both', padx=30, pady=(0, 20))
         self._container.pack_propagate(False)
@@ -589,7 +568,6 @@ class CameraScreen(BaseScreen):
             w.destroy()
         self._running = False
         self._lbl = None
-        self.after(1, self._focus_camera_screen)
 
         if not HAS_CAMERA:
             tk.Label(self._container,
@@ -627,20 +605,6 @@ class CameraScreen(BaseScreen):
             self._lbl.image = photo
         self.after(40, self._tick)
 
-    def focus_target(self):
-        return self._focus_anchor or self
-
-    def _focus_camera_screen(self):
-        try:
-            if self._focus_anchor and self._focus_anchor.winfo_exists():
-                self._focus_anchor.focus_force()
-                self._focus_anchor.focus_set()
-            else:
-                self.focus_force()
-                self.focus_set()
-        except Exception:
-            pass
-
     def on_hide(self):
         self._running = False
         if self._cap:
@@ -653,7 +617,6 @@ class SpeakerScreen(BaseScreen):
     def __init__(self, parent, app):
         super().__init__(parent, app)
         self._noise = NoisePlayer()
-        self._toggle_btn = None
         self._build()
 
     def _build(self):
@@ -677,15 +640,6 @@ class SpeakerScreen(BaseScreen):
                              font=(FONT_SANS, 14), bg=BG, fg=SUBTEXT)
         self._sub.pack(pady=8)
 
-        self._toggle_btn = NoMouseButton(center,
-                              text='Toggle Speakers (Space)',
-                              font=(FONT_SANS, 16, 'bold'),
-                              bg=ACCENT, fg='white',
-                              activebackground='#58aef0', activeforeground='white',
-                              bd=0, relief='flat', padx=26, pady=12,
-                              cursor='hand2', command=self._toggle)
-        self._toggle_btn.pack(pady=(10, 0))
-
         if not HAS_AUDIO:
             tk.Label(center,
                      text='⚠ audio libraries not available\n(bundle sounddevice + numpy into EXE)',
@@ -697,29 +651,12 @@ class SpeakerScreen(BaseScreen):
         self._icon.config(fg=SUBTEXT)
         self._sub.config(text='')
         set_system_volume_40_percent_best_effort()
-        self.app.root.bind_all('<KeyPress-space>', self._toggle)
-        self.app.root.bind_all('<space>', self._toggle)
-        self.after(1, self._focus_speaker_screen)
+        self.app.root.bind('<space>', self._toggle)
 
     def on_hide(self):
         self._noise.stop()
         try:
-            self.app.root.unbind_all('<KeyPress-space>')
-            self.app.root.unbind_all('<space>')
-        except Exception:
-            pass
-
-    def focus_target(self):
-        return self._toggle_btn or self
-
-    def _focus_speaker_screen(self):
-        try:
-            if self._toggle_btn and self._toggle_btn.winfo_exists():
-                self._toggle_btn.focus_force()
-                self._toggle_btn.focus_set()
-            else:
-                self.focus_force()
-                self.focus_set()
+            self.app.root.unbind('<space>')
         except Exception:
             pass
 
@@ -734,7 +671,6 @@ class SpeakerScreen(BaseScreen):
             self._prompt.config(text='Playing...', fg=SUCCESS)
             self._icon.config(fg=SUCCESS)
             self._sub.config(text='Press Spacebar again to stop')
-        return 'break'
 
 # ─── Screen 3: Keyboard ────────────────────────────────────────────────────────
 
@@ -908,9 +844,6 @@ class KeyboardScreen(BaseScreen):
         self._key_down(ev)
         return 'break'
 
-    def focus_target(self):
-        return self._canvas
-
     def on_hide(self):
         try:
             self.app.root.unbind_all('<KeyPress>')
@@ -1028,16 +961,12 @@ class InfoScreen(BaseScreen):
 
         btn_frame = tk.Frame(self, bg=BG)
         btn_frame.pack(fill='x', side='bottom', pady=10, padx=14)
-        self._exit_btn = NoMouseButton(btn_frame, text='Exit  ✕',
+        tk.Button(btn_frame, text='Exit  ✕',
                   font=(FONT_SANS, 12, 'bold'),
                   bg='#c0392b', fg='white',
                   activebackground='#e74c3c', activeforeground='white',
                   bd=0, relief='flat', padx=22, pady=10, cursor='hand2',
-                  command=self.app.quit_app)
-        self._exit_btn.pack(side='right')
-
-    def focus_target(self):
-        return getattr(self, '_exit_btn', None)
+                  command=self.app.quit_app).pack(side='right')
 
     def _retry(self):
         if self.app.system_info:
@@ -1059,16 +988,15 @@ class MARScreen(BaseScreen):
         center.pack(expand=True)
 
         tk.Label(center,
-                 text='Run Install_DPK.bat from the MARTOOLS folder.\nWhen finished, click MAR Done.',
+                 text='Open the MARTOOLS folder and run MAR manually.\nWhen finished, click MAR Done.',
                  font=(FONT_SANS, 14), bg=BG, fg=TEXT, justify='center').pack(pady=10)
 
-        self._open_btn = NoMouseButton(center, text='Run MAR',
+        tk.Button(center, text='Open MARTOOLS Folder',
                   font=(FONT_SANS, 16),
                   bg=ACCENT, fg='white',
                   activebackground='#58aef0', activeforeground='white',
                   bd=0, relief='flat', padx=30, pady=14, cursor='hand2',
-                  command=self._open_martools)
-        self._open_btn.pack(pady=14)
+                  command=self._open_martools).pack(pady=14)
 
         self._status_lbl = tk.Label(center, text='',
                                     font=(FONT_SANS, 13), bg=BG, fg=SUBTEXT,
@@ -1077,22 +1005,13 @@ class MARScreen(BaseScreen):
 
     def on_show(self):
         self._status_lbl.config(text='', fg=SUBTEXT)
-        self.app.root.bind('<Return>', self._open_martools_key)
-        self.app.root.bind('<space>', self._open_martools_key)
+        self.app.root.bind('<Return>', lambda e: self._open_martools())
 
     def on_hide(self):
         try:
             self.app.root.unbind('<Return>')
-            self.app.root.unbind('<space>')
         except Exception:
             pass
-
-    def focus_target(self):
-        return getattr(self, '_open_btn', self)
-
-    def _open_martools_key(self, _=None):
-        self._open_martools()
-        return 'break'
 
     def _open_martools(self):
         base = script_dir() / 'MARTOOLS'
@@ -1101,20 +1020,10 @@ class MARScreen(BaseScreen):
                 text=f'MARTOOLS folder not found at: {base}', fg=ERROR_C)
             return
 
-        bat_path = base / 'Install_DPK.bat'
-        if not bat_path.is_file():
-            self._status_lbl.config(
-                text=f'Install_DPK.bat not found at: {bat_path}', fg=ERROR_C)
-            return
-
         try:
-            subprocess.Popen(
-                ['cmd', '/c', 'start', '', str(bat_path)],
-                cwd=str(base),
-                shell=False
-            )
+            subprocess.Popen(['explorer', str(base)])
         except Exception as e:
-            self._status_lbl.config(text=f'Could not run Install_DPK.bat: {e}', fg=ERROR_C)
+            self._status_lbl.config(text=f'Could not open folder: {e}', fg=ERROR_C)
             return
 
         # Shrink tester to small floating window filled by MAR Done button
@@ -1123,7 +1032,7 @@ class MARScreen(BaseScreen):
         win_w, win_h = 320, 120
         x = sw - win_w - 20
         y = sh - win_h - 60
-        self.app._leave_borderless_fullscreen()
+        self.app.root.attributes('-fullscreen', False)
         self.app.root.attributes('-topmost', True)
         self.app.root.geometry(f'{win_w}x{win_h}+{x}+{y}')
 
@@ -1132,30 +1041,21 @@ class MARScreen(BaseScreen):
             w.pack_forget()
         self._overlay = tk.Frame(self.app.root, bg='#27ae60')
         self._overlay.pack(fill='both', expand=True)
-        self._mar_done_btn = NoMouseButton(self._overlay, text='MAR Done\n\nPress Enter or Space',
+        tk.Button(self._overlay, text='MAR Done',
                   font=(FONT_SANS, 18, 'bold'),
                   bg='#27ae60', fg='white',
                   activebackground='#2ecc71', activeforeground='white',
                   bd=0, relief='flat', cursor='hand2',
-                  command=self._mar_done)
-        self._mar_done_btn.pack(fill='both', expand=True)
-        self._mar_done_btn.focus_set()
-        self.app.root.bind('<Return>', lambda e: self._mar_done())
-        self.app.root.bind('<space>', lambda e: self._mar_done())
+                  command=self._mar_done).pack(fill='both', expand=True)
 
     def _mar_done(self):
-        try:
-            self.app.root.unbind('<Return>')
-            self.app.root.unbind('<space>')
-        except Exception:
-            pass
         try:
             self._overlay.destroy()
             self._overlay = None
         except Exception:
             pass
         # Restore fullscreen and go to next screen (Info)
-        self.app._enter_borderless_fullscreen()
+        self.app.root.attributes('-fullscreen', True)
         self.app.root.attributes('-topmost', True)
         self.app.root.lift()
         self.app.root.focus_force()
@@ -1389,7 +1289,7 @@ class SyncScreen(BaseScreen):
         for letter, label, bgc, fgc in grades:
             f = tk.Frame(row, bg=fgc, padx=2, pady=2)
             f.pack(side='left', padx=12)
-            NoMouseButton(f, text=letter + '\n' + label,
+            tk.Button(f, text=letter + '\n' + label,
                       font=(FONT_SANS, 18, 'bold'), bg=bgc, fg=fgc,
                       activebackground=fgc, activeforeground='#0a0a12',
                       bd=0, relief='flat', width=9, pady=16, cursor='hand2',
@@ -1481,13 +1381,6 @@ class SyncScreen(BaseScreen):
         except Exception as e:
             pass  # sysprep will handle its own UI
 
-    def focus_target(self):
-        for name in ('_ip_entry', '_csad_entry', '_notes_txt'):
-            widget = getattr(self, name, None)
-            if widget and widget.winfo_exists():
-                return widget
-        return getattr(self, '_retry_btn', None)
-
     def _show_done(self):
         ok = self._last_ok
         msg = self._last_msg
@@ -1512,12 +1405,11 @@ class SyncScreen(BaseScreen):
             tk.Label(box, text=msg,
                      font=(FONT_SANS, 13), bg=BG, fg=WARNING,
                      wraplength=480, justify='center').pack(pady=8)
-            self._retry_btn = NoMouseButton(box, text='Try Again',
+            tk.Button(box, text='Try Again',
                       font=(FONT_SANS, 13), bg=PANEL, fg=TEXT,
                       activebackground=ACCENT, activeforeground='white',
                       bd=0, relief='flat', padx=22, pady=12, cursor='hand2',
-                      command=lambda: self._goto(self.STEP_GRADE))
-            self._retry_btn.pack(pady=8)
+                      command=lambda: self._goto(self.STEP_GRADE)).pack(pady=8)
 
     def _goto(self, step):
         self._step = step
@@ -1536,9 +1428,20 @@ class SyncScreen(BaseScreen):
 class App:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title('CSAD Windows Tester')
+        self.root.title('Windows Laptop / PC Tester')
         self.root.configure(bg=BG)
+        self.root.attributes('-fullscreen', True)
         self.root.attributes('-topmost', True)
+
+        def _grab_focus(e=None):
+            # <Map> fires for every widget — only handle the root window itself
+            if e and str(e.widget) != '.':
+                return
+            self.root.lift()
+            self.root.focus_force()
+
+        # <Map> fires when the window first becomes visible — most reliable way to grab focus
+        self.root.bind('<Map>', _grab_focus)
 
         self.sw = self.root.winfo_screenwidth()
         self.sh = self.root.winfo_screenheight()
@@ -1548,164 +1451,14 @@ class App:
         self._active = None
         self.mode = detect_machine_mode()
         self._screen_titles = []
-        self._focus_job = None
-        self._focus_jobs = []
-        self._screens = []
-        self._screen_builders = []
-        self._startup_box = None
-        self._kiosk_enabled = False
-
-        # Start in a normal maximized window first. This is usually much less
-        # flickery on Windows than going straight into overrideredirect
-        # fullscreen before the window is really alive.
-        self.root.geometry('900x600+60+40')
-        try:
-            self.root.state('zoomed')
-        except Exception:
-            self.root.geometry(f'{self.sw}x{self.sh}+0+0')
 
         threading.Thread(target=self._load_info, daemon=True).start()
 
         self._build_ui()
-        self._init_screen_builders()
-        self._show_startup_placeholder()
-        self.root.update_idletasks()
-        self.root.after(30, self._raise_startup_window)
-        self.root.after(180, self._finish_startup)
-        self.root.after(650, self._enter_kiosk_mode)
-
-    def _init_screen_builders(self):
-        if self.mode == 'desktop':
-            self._screen_titles = [
-                'Speaker Test',
-                'MAR',
-                'System Info',
-            ]
-            self._screen_builders = [
-                lambda: SpeakerScreen(self._area, self),
-                lambda: MARScreen(self._area, self),
-                lambda: InfoScreen(self._area, self),
-            ]
-        else:
-            self.mode = 'laptop'
-            self._screen_titles = SCREEN_TITLES[:]
-            self._screen_builders = [
-                lambda: CameraScreen(self._area, self),
-                lambda: SpeakerScreen(self._area, self),
-                lambda: KeyboardScreen(self._area, self),
-                lambda: MARScreen(self._area, self),
-                lambda: InfoScreen(self._area, self),
-            ]
-        self._screens = [None] * len(self._screen_builders)
-
-    def _get_screen(self, idx):
-        scr = self._screens[idx]
-        if scr is None:
-            scr = self._screen_builders[idx]()
-            self._screens[idx] = scr
-        return scr
+        self._show(0)
 
     def _load_info(self):
         self.system_info = get_system_info()
-
-    def _raise_startup_window(self):
-        try:
-            self.root.deiconify()
-            self.root.lift()
-            self.root.focus_force()
-            self.root.focus_set()
-        except Exception:
-            pass
-
-    def _show_startup_placeholder(self):
-        self._startup_box = tk.Frame(self._area, bg=BG)
-        self._startup_box.pack(fill='both', expand=True)
-        tk.Label(
-            self._startup_box,
-            text='Starting tester…',
-            font=(FONT_SANS, 24, 'bold'),
-            bg=BG,
-            fg=TEXT
-        ).pack(expand=True)
-
-    def _finish_startup(self):
-        try:
-            if self._startup_box and self._startup_box.winfo_exists():
-                self._startup_box.destroy()
-        except Exception:
-            pass
-        self._show(0)
-        self._schedule_focus_boost()
-
-    def _enter_kiosk_mode(self):
-        if self._kiosk_enabled:
-            return
-        self._kiosk_enabled = True
-        try:
-            self.root.overrideredirect(True)
-        except Exception:
-            pass
-        self.root.geometry(f'{self.sw}x{self.sh}+0+0')
-        try:
-            self.root.lift()
-            self.root.focus_force()
-        except Exception:
-            pass
-        self._schedule_focus_boost()
-
-    def _leave_borderless_fullscreen(self):
-        self._kiosk_enabled = False
-        try:
-            self.root.overrideredirect(False)
-        except Exception:
-            pass
-        self.root.attributes('-topmost', True)
-
-    def _enter_borderless_fullscreen(self):
-        try:
-            self.root.state('normal')
-        except Exception:
-            pass
-        self.root.geometry(f'{self.sw}x{self.sh}+0+0')
-        self.root.after(10, self._enter_kiosk_mode)
-
-    def _schedule_focus_boost(self):
-        if self._focus_job:
-            try:
-                self.root.after_cancel(self._focus_job)
-            except Exception:
-                pass
-        for job in self._focus_jobs:
-            try:
-                self.root.after_cancel(job)
-            except Exception:
-                pass
-        self._focus_jobs = []
-        delays = (1, 50, 120, 250, 450, 800, 1200)
-        self._focus_job = self.root.after(delays[0], self._focus_active_widget)
-        for d in delays[1:]:
-            self._focus_jobs.append(self.root.after(d, self._focus_active_widget))
-
-    def _focus_active_widget(self):
-        try:
-            self.root.lift()
-            self.root.focus_force()
-            target = None
-            if self._active and hasattr(self._active, 'focus_target'):
-                target = self._active.focus_target()
-            if target and target.winfo_exists():
-                try:
-                    target.focus_force()
-                except Exception:
-                    pass
-                try:
-                    target.focus_set()
-                except Exception:
-                    pass
-            else:
-                self.root.focus_set()
-        except Exception:
-            pass
 
     def _build_ui(self):
         header = tk.Frame(self.root, bg=HEADER_BG, height=44)
@@ -1721,7 +1474,7 @@ class App:
         )
         self._model_lbl.pack(side='left', padx=14, pady=6)
 
-        self._header_exit_btn = NoMouseButton(
+        tk.Button(
             header,
             text='✕  EXIT',
             font=(FONT_SANS, 11, 'bold'),
@@ -1735,8 +1488,7 @@ class App:
             padx=16,
             pady=4,
             command=self.quit_app
-        )
-        self._header_exit_btn.pack(side='right', padx=10, pady=6)
+        ).pack(side='right', padx=10, pady=6)
 
         tk.Frame(self.root, bg=BORDER, height=1).pack(fill='x', side='top')
 
@@ -1745,7 +1497,7 @@ class App:
         footer.pack_propagate(False)
         self._footer = footer
 
-        self._prev_btn = NoMouseButton(
+        self._prev_btn = tk.Button(
             footer,
             text='◀  Previous',
             font=(FONT_SANS, 12),
@@ -1771,7 +1523,7 @@ class App:
         )
         self._title_lbl.pack(side='left', expand=True)
 
-        self._next_btn = NoMouseButton(
+        self._next_btn = tk.Button(
             footer,
             text='Next  ▶',
             font=(FONT_SANS, 12),
@@ -1791,10 +1543,30 @@ class App:
         self._area = tk.Frame(self.root, bg=BG)
         self._area.pack(fill='both', expand=True)
 
+        if self.mode == 'desktop':
+            self._screens = [
+                SpeakerScreen(self._area, self),
+                MARScreen(self._area, self),
+                InfoScreen(self._area, self),
+            ]
+            self._screen_titles = [
+                'Speaker Test',
+                'MAR',
+                'System Info',
+            ]
+        else:
+            self.mode = 'laptop'
+            self._screens = [
+                CameraScreen(self._area, self),
+                SpeakerScreen(self._area, self),
+                KeyboardScreen(self._area, self),
+                MARScreen(self._area, self),
+                InfoScreen(self._area, self),
+            ]
+            self._screen_titles = SCREEN_TITLES[:]
+
         self.root.bind('<Shift-Right>', lambda e: self.next_screen())
         self.root.bind('<Shift-Left>',  lambda e: self.prev_screen())
-        self.root.bind('<F6>', lambda e: self.prev_screen())
-        self.root.bind('<F7>', lambda e: self.next_screen())
 
     def _rebuild_ui(self):
         # Rebuild the full app UI after MAR overlay destroys it
@@ -1813,11 +1585,10 @@ class App:
             self._active.pack_forget()
 
         self._idx = idx
-        scr = self._get_screen(idx)
+        scr = self._screens[idx]
         scr.pack(fill='both', expand=True)
         scr.on_show()
         self._active = scr
-        self._schedule_focus_boost()
 
         title = self._screen_titles[idx] if idx < len(self._screen_titles) else ''
         self._title_lbl.config(text=f'{title}  ·  {idx + 1} / {len(self._screens)}')
