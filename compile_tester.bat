@@ -1,7 +1,7 @@
 @echo off
 echo Building windows_tester.exe...
 
-python3 -m PyInstaller --onefile --noconsole windows_tester.py
+python3 -m PyInstaller --onefile --windowed windows_tester.py
 
 if errorlevel 1 (
     echo.
