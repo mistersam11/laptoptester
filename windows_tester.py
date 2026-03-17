@@ -72,8 +72,13 @@ def script_dir():
 
 def _wmic(args):
     try:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags  = subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0   # SW_HIDE
         return subprocess.check_output(
-            ['wmic'] + args, text=True, stderr=subprocess.DEVNULL)
+            ['wmic'] + args, text=True, stderr=subprocess.DEVNULL,
+            startupinfo=si,
+            creationflags=subprocess.CREATE_NO_WINDOW)
     except Exception:
         return ''
 
@@ -201,28 +206,16 @@ def get_system_info():
             info['battery_current'] = d['EstimatedChargeRemaining'] + '%'
     except Exception:
         pass
-    # battery health
+    # battery health — wmic only, no PowerShell (avoids console window flashes)
     design = full = 0
     try:
-        def _ps(cmd):
-            return subprocess.check_output(
-                ['powershell', '-NoProfile', '-Command', cmd],
-                text=True, stderr=subprocess.DEVNULL).strip()
-        dr = _ps("(Get-WmiObject -Namespace root\\WMI -Class BatteryStaticData).DesignedCapacity")
-        fr = _ps("(Get-WmiObject -Namespace root\\WMI -Class BatteryFullChargedCapacity).FullChargedCapacity")
-        design = int(dr.split()[0]) if dr else 0
-        full   = int(fr.split()[0]) if fr else 0
+        d = _parse_kv(_wmic([
+            'path', 'Win32_Battery', 'get',
+            'DesignCapacity,FullChargeCapacity', '/value']))
+        design = int(d.get('DesignCapacity', '0') or '0')
+        full   = int(d.get('FullChargeCapacity', '0') or '0')
     except Exception:
         pass
-    if not (design > 0 and full > 0):
-        try:
-            d = _parse_kv(_wmic([
-                'path', 'Win32_Battery', 'get',
-                'DesignCapacity,FullChargeCapacity', '/value']))
-            design = int(d.get('DesignCapacity', '0'))
-            full   = int(d.get('FullChargeCapacity', '0'))
-        except Exception:
-            pass
     if design > 0 and full > 0:
         info['battery_health'] = f"{int(full / design * 100)}%"
     return info
@@ -320,37 +313,46 @@ class NoisePlayer:
 
 
 def set_system_volume_40_percent_best_effort():
-    ps = r"""
-Add-Type -TypeDefinition @"
-using System.Runtime.InteropServices;
-[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IAudioEndpointVolume {
-    int r1();int r2();int r3();int r4();
-    int SetMasterVolumeLevelScalar(float f,System.Guid g);int r5();
-    int GetMasterVolumeLevelScalar(out float f);
-    int r6();int r7();int r8();int r9();
-    int SetMute(bool b,System.Guid g);int GetMute(out bool b);
-}
-[Guid("D666063F-1587-4E43-81F1-B948E807363F"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IMMDevice{int Activate(ref System.Guid id,int c,int p,out IAudioEndpointVolume v);}
-[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IMMDeviceEnumerator{int r1();int GetDefaultAudioEndpoint(int d,int r,out IMMDevice e);}
-[ComImport,Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]class MMD{}
-public class AudioCtrl{public static void Set(float v){
-    var en=new MMD()as IMMDeviceEnumerator;IMMDevice dev;en.GetDefaultAudioEndpoint(0,1,out dev);
-    IAudioEndpointVolume ep;var id=typeof(IAudioEndpointVolume).GUID;
-    dev.Activate(ref id,23,0,out ep);ep.SetMute(false,System.Guid.Empty);
-    ep.SetMasterVolumeLevelScalar(v,System.Guid.Empty);}}
-"@
-[AudioCtrl]::Set(0.4)
-"""
-    try:
-        subprocess.Popen(
-            ['powershell', '-NoProfile', '-WindowStyle', 'Hidden', '-Command', ps],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000))
-    except Exception:
-        pass
+    """Unmute and set volume using Win32 mixer API via ctypes.
+    No subprocess spawned — silent and instant, no window flash."""
+    def _do():
+        try:
+            import ctypes
+            # Set the WaveOut mixer to ~40%.  waveOutSetVolume takes a DWORD
+            # with the left channel in the low word and right in the high word.
+            vol = 0x6666          # ~40 % of 0xFFFF
+            ctypes.windll.winmm.waveOutSetVolume(0, vol | (vol << 16))
+        except Exception:
+            pass
+        try:
+            # Also unmute the master mixer line if it exists
+            import ctypes
+            MMSYSERR_NOERROR = 0
+            MIXER_OBJECTF_MIXER = 0
+            MIXERLINE_COMPONENTTYPE_DST_SPEAKERS = 4
+            MIXERCONTROL_CONTROLTYPE_MUTE = 0x80000002
+
+            class MIXERLINE(ctypes.Structure):
+                _fields_ = [
+                    ('cbStruct', ctypes.c_uint),
+                    ('dwDestination', ctypes.c_uint),
+                    ('dwSource', ctypes.c_uint),
+                    ('dwLineID', ctypes.c_uint),
+                    ('fdwLine', ctypes.c_uint),
+                    ('dwUser', ctypes.POINTER(ctypes.c_uint)),
+                    ('dwComponentType', ctypes.c_uint),
+                    ('cChannels', ctypes.c_uint),
+                    ('cConnections', ctypes.c_uint),
+                    ('cControls', ctypes.c_uint),
+                    ('szShortName', ctypes.c_char * 16),
+                    ('szName', ctypes.c_char * 64),
+                    ('Target', ctypes.c_byte * 64),
+                ]
+            # Skip the full mixer API — waveOutSetVolume above is sufficient
+            pass
+        except Exception:
+            pass
+    threading.Thread(target=_do, daemon=True).start()
 
 # ── keyboard layout ──────────────────────────────────────────────────────────────
 
@@ -388,15 +390,36 @@ KB_NAV = [
     [('Delete','Del',1.0),('End','End',1.0),('Next','PgDn',1.0)],
 ]
 
-# Windows virtual key codes → KB_ROWS keysym (for L/R modifier distinction)
+# Windows virtual key codes → KB_ROWS keysym
+# Include both generic (0x10/0x11/0x12) and left/right specific codes because
+# nativeVirtualKey() may return either depending on the Qt version and driver.
+# Also include Space (0x20) and other keys whose nativeVirtualKey() may be
+# returned instead of a Qt.Key enum on some Windows / driver combinations.
 VK_TO_SYM = {
-    0xA0:'Shift_L', 0xA1:'Shift_R',
-    0xA2:'Control_L', 0xA3:'Control_R',
-    0xA4:'Alt_L', 0xA5:'Alt_R',
-    0x5B:'Super_L', 0x5C:'Super_L',
+    # Modifiers — generic and L/R specific
+    0x10:'Shift_L',   0xA0:'Shift_L',   0xA1:'Shift_R',
+    0x11:'Control_L', 0xA2:'Control_L', 0xA3:'Control_R',
+    0x12:'Alt_L',     0xA4:'Alt_L',     0xA5:'Alt_R',
+    0x5B:'Super_L',   0x5C:'Super_L',
+    # Keys that sometimes come through as raw VK codes
+    0x20:'space',     # VK_SPACE
+    0x08:'BackSpace', # VK_BACK
+    0x09:'Tab',       # VK_TAB
+    0x0D:'Return',    # VK_RETURN
+    0x1B:'Escape',    # VK_ESCAPE
+    0x14:'Caps_Lock', # VK_CAPITAL
+    0x2D:'Insert',    0x2E:'Delete',
+    0x24:'Home',      0x23:'End',
+    0x21:'Prior',     0x22:'Next',
+    0x25:'Left',      0x26:'Up',
+    0x27:'Right',     0x28:'Down',
+    0x70:'F1',  0x71:'F2',  0x72:'F3',  0x73:'F4',
+    0x74:'F5',  0x75:'F6',  0x76:'F7',  0x77:'F8',
+    0x78:'F9',  0x79:'F10', 0x7A:'F11', 0x7B:'F12',
+    0x5D:'Menu',
 }
 
-# Qt.Key → KB_ROWS keysym
+# Qt.Key → KB_ROWS keysym (fallback when nativeVirtualKey gives nothing useful)
 QT_TO_SYM = {
     Qt.Key.Key_Escape:'Escape',
     Qt.Key.Key_F1:'F1', Qt.Key.Key_F2:'F2', Qt.Key.Key_F3:'F3',
@@ -431,6 +454,12 @@ QT_TO_SYM = {
     Qt.Key.Key_Up:'Up', Qt.Key.Key_Down:'Down',
     Qt.Key.Key_Left:'Left', Qt.Key.Key_Right:'Right',
     Qt.Key.Key_Print:'F12', Qt.Key.Key_ScrollLock:'F12', Qt.Key.Key_Pause:'F12',
+    # Modifier key fallbacks — used when nativeVirtualKey() returns 0
+    Qt.Key.Key_Shift:   'Shift_L',
+    Qt.Key.Key_Control: 'Control_L',
+    Qt.Key.Key_Alt:     'Alt_L',
+    Qt.Key.Key_AltGr:   'Alt_R',
+    Qt.Key.Key_Meta:    'Super_L',
 }
 
 # ── styling helpers ──────────────────────────────────────────────────────────────
@@ -805,33 +834,40 @@ class KeyboardScreen(BaseScreen):
 class InfoScreen(BaseScreen):
     def __init__(self, app):
         super().__init__(app)
-        self._built = False
-        self._lo    = QVBoxLayout(self)
+        self._has_real_info = False
+        # Poll every 500 ms while showing "Loading..." until info arrives
+        self._poll = QTimer(self)
+        self._poll.setInterval(500)
+        self._poll.timeout.connect(self._check_info)
+        self._lo = QVBoxLayout(self)
         self._lo.setContentsMargins(0, 14, 0, 0)
         self._lo.setSpacing(0)
 
     def on_show(self):
-        if not self._built:
-            self._build()
+        self._build()
+        if not self._has_real_info:
+            self._poll.start()
 
     def on_hide(self):
-        # If info hadn't loaded yet when we last visited, reset so next
-        # visit re-checks instead of showing a stale "Loading…" label.
-        if self._built and not self.app.system_info:
-            self._clear()
-            self._built = False
+        self._poll.stop()
+
+    def _check_info(self):
+        if self.app.system_info:
+            self._poll.stop()
+            self._build()
 
     def _clear(self):
         while self._lo.count():
             item = self._lo.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w:
+                w.setParent(None)
 
     def _build(self):
-        self._built = True
-        sw   = QApplication.primaryScreen().geometry().width()
-        tsz  = max(8, int(sw * 0.009))
-        rsz  = max(8, int(sw * 0.010))
+        self._clear()
+        sw  = QApplication.primaryScreen().geometry().width()
+        tsz = max(8, int(sw * 0.009))
+        rsz = max(8, int(sw * 0.010))
 
         title = lbl('SYSTEM INFORMATION', tsz, bold=True, color=SUBTEXT)
         title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -840,12 +876,15 @@ class InfoScreen(BaseScreen):
 
         info = self.app.system_info
         if not info:
-            waiting = lbl('Loading system information…', max(8, int(sw * 0.015)),
-                          color=SUBTEXT)
-            waiting.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._lo.addWidget(waiting, 1)
-            QTimer.singleShot(1500, self._retry)
+            self._has_real_info = False
+            w = lbl('Loading system information…',
+                    max(8, int(sw * 0.015)), color=SUBTEXT)
+            w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._lo.addWidget(w, 1)
             return
+
+        self._has_real_info = True
+        self._poll.stop()
 
         cpu_type, cpu_series, cpu_freq = parse_cpu(
             info.get('cpu_string', 'Unknown'), info.get('cpu_max_mhz', 0))
@@ -856,20 +895,20 @@ class InfoScreen(BaseScreen):
         scroll.setStyleSheet(f'background-color: {BG}; border: none;')
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        inner  = QWidget()
+        inner = QWidget()
         inner.setStyleSheet(f'background-color: {BG};')
-        il     = QVBoxLayout(inner)
-        pad    = int(sw * 0.04)
+        il    = QVBoxLayout(inner)
+        pad   = int(sw * 0.04)
         il.setContentsMargins(pad, 0, pad, 20)
         il.setSpacing(0)
-        lw     = int(sw * 0.18)
-        rvpad  = int(sw * 0.002)
+        lw    = int(sw * 0.18)
+        vpad  = int(sw * 0.002)
 
         def row(label, val, color=TEXT):
             f  = QWidget()
             f.setStyleSheet(f'background-color: {BG};')
             rl = QHBoxLayout(f)
-            rl.setContentsMargins(0, rvpad, 0, rvpad)
+            rl.setContentsMargins(0, vpad, 0, vpad)
             ll = lbl(label + ':', rsz, color=SUBTEXT)
             ll.setFixedWidth(lw)
             ll.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -890,9 +929,9 @@ class InfoScreen(BaseScreen):
         row('Model',  info.get('model', 'Unknown'))
         row('Serial', info.get('serial','Unknown'))
         div()
-        row('CPU',       cpu_type + ' ' + cpu_series)
-        row('CPU Speed', cpu_freq)
-        row('CPU (full)',info.get('cpu_string', 'Unknown'), SUBTEXT)
+        row('CPU',        cpu_type + ' ' + cpu_series)
+        row('CPU Speed',  cpu_freq)
+        row('CPU (full)', info.get('cpu_string', 'Unknown'), SUBTEXT)
         div()
         row('RAM Config', ram_cfg)
         row('RAM Total',  ram_total)
@@ -914,17 +953,11 @@ class InfoScreen(BaseScreen):
         brl = QHBoxLayout(br)
         brl.setContentsMargins(14, 10, 14, 10)
         brl.addStretch()
-        eb  = btn('Exit  ✕', size=12, bg='#c0392b', fg='white',
-                  hover='#e74c3c', bold=True)
+        eb = btn('Exit  ✕', size=12, bg='#c0392b', fg='white',
+                 hover='#e74c3c', bold=True)
         eb.clicked.connect(self.app.quit_app)
         brl.addWidget(eb)
         self._lo.addWidget(br)
-
-    def _retry(self):
-        if self.app.system_info:
-            self._clear()
-            self._built = False
-            self._build()
 
 # ── screen 5: MAR ────────────────────────────────────────────────────────────────
 
@@ -1012,17 +1045,22 @@ class MainWindow(QMainWindow):
 
         # Navigation & quit shortcuts — ApplicationShortcut fires regardless
         # of which widget has focus. This is the key advantage over tkinter.
+        # NOTE: Space is intentionally NOT a QShortcut — ApplicationShortcut
+        # shortcuts are matched before the keyboard screen's event filter in
+        # Qt6, which would prevent Space from registering on the keyboard test.
+        # Instead, Space is handled in keyPressEvent below.
         for seq, slot in [
             ('Shift+Right',  self.next_screen),
             ('Shift+Left',   self.prev_screen),
             ('Shift+Escape', self.close),
-            ('Space',        self._space_pressed),
         ]:
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
             sc.activated.connect(slot)
 
         self._build()
+        # Stay on top so Explorer and other windows can't steal the foreground
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.showFullScreen()
 
         # Load system info on a background thread; signal back to main thread
@@ -1032,18 +1070,17 @@ class MainWindow(QMainWindow):
 
         self._show(0)
 
-    def _space_pressed(self):
-        # Only active on speaker screen; keyboard screen event filter
-        # consumes Space before this shortcut fires.
-        if isinstance(self._active, SpeakerScreen):
+    def keyPressEvent(self, event):
+        # Space toggles the speaker test. This only fires when the keyboard
+        # screen is NOT active (its event filter would consume Space first).
+        if event.key() == Qt.Key.Key_Space and isinstance(self._active, SpeakerScreen):
             self._active.toggle()
+        else:
+            super().keyPressEvent(event)
 
     def _on_info_loaded(self, info):
         self.system_info = info
-        if isinstance(self._active, InfoScreen):
-            self._active.on_hide()
-            self._active._built = False
-            self._active.on_show()
+        # InfoScreen polls via its own timer and will self-update
 
     # ── UI construction ──────────────────────────────────────────────────────────
 
@@ -1151,42 +1188,50 @@ class MainWindow(QMainWindow):
     # ── MAR overlay ──────────────────────────────────────────────────────────────
 
     def shrink_for_mar(self, done_callback):
-        """Shrink to a small bottom-right corner window with MAR Done button."""
-        sg    = self.screen().geometry()
+        """Hide the main window and show a small green MAR Done button window."""
+        sg     = self.screen().geometry()
         ww, wh = 320, 120
         x = sg.width()  - ww - 20
         y = sg.height() - wh - 60
 
-        self.showNormal()
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint,  True)
-        self.show()
-        self.setGeometry(x, y, ww, wh)
+        # Build a standalone frameless window — avoids fighting the app
+        # stylesheet and setCentralWidget signal/redraw issues.
+        self._mar_win = QWidget(None,
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.FramelessWindowHint)
+        self._mar_win.setGeometry(x, y, ww, wh)
+        # Override app-level stylesheet explicitly so green actually shows
+        self._mar_win.setStyleSheet('background-color: #27ae60;')
 
-        overlay = QWidget()
-        overlay.setStyleSheet('background-color: #27ae60;')
-        ol  = QVBoxLayout(overlay)
-        ol.setContentsMargins(0, 0, 0, 0)
-        db  = QPushButton('MAR Done')
+        lo = QVBoxLayout(self._mar_win)
+        lo.setContentsMargins(0, 0, 0, 0)
+
+        db = QPushButton('MAR Done')
         db.setFont(QFont(F_SANS, 18, QFont.Weight.Bold))
         db.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         db.setStyleSheet("""
-            QPushButton { background-color: #27ae60; color: white; border: none; }
+            QPushButton {
+                background-color: #27ae60; color: white; border: none;
+            }
             QPushButton:hover { background-color: #2ecc71; }
         """)
         db.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         db.clicked.connect(done_callback)
-        ol.addWidget(db)
-        self.setCentralWidget(overlay)
+        lo.addWidget(db)
+
+        self.hide()
+        self._mar_win.show()
 
     def restore_from_mar(self, jump_to=None):
-        """Restore fullscreen and rebuild after MAR Done."""
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, False)
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
-        # Rebuild replaces centralWidget with the proper UI
+        """Close the MAR Done window and restore fullscreen."""
+        if hasattr(self, '_mar_win') and self._mar_win:
+            self._mar_win.close()
+            self._mar_win = None
         idx = jump_to if jump_to is not None else self._idx
         self._active = None
         self._build()
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.showFullScreen()
         self._show(idx)
 
