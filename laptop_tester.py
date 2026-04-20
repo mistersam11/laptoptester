@@ -224,7 +224,7 @@ def get_system_info():
         # Use version if it looks like a friendly name (has a space or starts
         # with a known Lenovo line keyword) and product_name looks like a SKU
         # (8+ chars, no spaces, mix of letters and digits).
-        _sku_pattern     = re.compile(r'^[A-Z0-9]{6,}$', re.I)
+        _sku_pattern     = re.compile(r'^[A-Z0-9]{4,}$', re.I)
         _friendly_kws    = ('thinkpad', 'ideapad', 'thinkbook', 'legion',
                             'yoga', 'slim', 'flex', 'carbon', 'extreme')
         _name_is_sku     = bool(_product_name and _sku_pattern.match(_product_name))
