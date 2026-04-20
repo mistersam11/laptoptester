@@ -290,6 +290,29 @@ def clean_total_ram(ram_config):
     total = sum(int(qty) * int(size) for qty, size in re.findall(r"(\d+)x(\d+)GB", ram_config))
     return f"{total}GB"
 
+def normalize_model_name(s):
+    s = str(s or "").strip().lower()
+
+    # remove punctuation separators
+    s = re.sub(r"[_\-]+", " ", s)
+    s = re.sub(r"[^\w\s]", "", s)
+
+    # normalize generation wording
+    s = re.sub(r"\b(\d+)(st|nd|rd|th)\s+gen\b", r"gen \1", s)
+    s = re.sub(r"\bfirst\s+gen\b", "gen 1", s)
+    s = re.sub(r"\bsecond\s+gen\b", "gen 2", s)
+    s = re.sub(r"\bthird\s+gen\b", "gen 3", s)
+    s = re.sub(r"\bfourth\s+gen\b", "gen 4", s)
+    s = re.sub(r"\bfifth\s+gen\b", "gen 5", s)
+    s = re.sub(r"\bsixth\s+gen\b", "gen 6", s)
+    s = re.sub(r"\bseventh\s+gen\b", "gen 7", s)
+    s = re.sub(r"\beighth\s+gen\b", "gen 8", s)
+    s = re.sub(r"\bninth\s+gen\b", "gen 9", s)
+    s = re.sub(r"\btenth\s+gen\b", "gen 10", s)
+
+    # collapse spaces
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 def append_to_log(data):
     """Find matching template row and append to daily log."""
@@ -305,10 +328,16 @@ def append_to_log(data):
     # Checks both directions so that a sent model of "HP EliteBook 840 G1"
     # matches a template entry of "EliteBook 840 G1", and vice-versa.
     template_row = None
-    sent_lower   = model.strip().lower()
+    sent_norm = normalize_model_name(model)
+
     for row in template_ws.iter_rows(min_row=2):
-        template_model = str(row[5].value).strip().lower()
-        if sent_lower in template_model or template_model in sent_lower:
+        template_model = str(row[5].value or "").strip()
+        template_norm = normalize_model_name(template_model)
+
+        if not template_norm:
+            continue
+
+        if sent_norm == template_norm or sent_norm in template_norm or template_norm in sent_norm:
             template_row = row
             break
 
