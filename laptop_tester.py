@@ -62,19 +62,6 @@ FONT_SANS   = 'DejaVu Sans'
 SCREEN_TITLES = ['Camera Test', 'Speaker Test', 'Keyboard Test', 'System Info', 'Sync']
 
 # ─── Persistent config ─────────────────────────────────────────────────────────
-# In Frugal PuppyLinux the root filesystem lives in RAM, so anything written
-# to a plain path is lost on reboot.  We need to find and write to a *real*
-# partition on disk (the USB stick or an internal drive) that persists across
-# boots and across swapping laptops.
-#
-# Strategy (tried in order):
-#   1. Any mount-point under /mnt whose device is a real block device
-#      (not tmpfs / ramfs / squashfs / aufs / overlay / devtmpfs etc.)
-#      and that is writable.
-#   2. /mnt/sda1, /mnt/sdb1 … /mnt/sdh4  scanned directly.
-#   3. Fall back to the script directory (works on a normal Linux install
-#      where the filesystem IS persistent).
-
 _FAKE_FS = {'tmpfs', 'ramfs', 'squashfs', 'aufs', 'overlay',
             'overlayfs', 'devtmpfs', 'sysfs', 'proc', 'cgroup',
             'cgroup2', 'pstore', 'efivarfs', 'securityfs', 'debugfs',
@@ -85,7 +72,6 @@ def _find_persistent_dir():
     """Return a writable Path on a real (non-RAM) filesystem, or None."""
     candidates = []
 
-    # ── 1. Parse /proc/mounts ──────────────────────────────────────────────────
     try:
         mounts = Path('/proc/mounts').read_text().splitlines()
         for line in mounts:
@@ -98,18 +84,15 @@ def _find_persistent_dir():
             if not device.startswith('/dev/'):
                 continue
             mp = Path(mountpoint)
-            # Prefer /mnt/* mounts; accept others but rank lower
             priority = 0 if str(mp).startswith('/mnt') else 1
             candidates.append((priority, mp))
     except:
         pass
 
-    # ── 2. Brute-force common PuppyLinux mount points ─────────────────────────
     for letter in 'abcdefgh':
         for part in range(1, 5):
             candidates.append((2, Path('/mnt/sd' + letter + str(part))))
 
-    # Sort by priority so /mnt/* paths come first
     candidates.sort(key=lambda x: x[0])
 
     for _, mp in candidates:
@@ -119,7 +102,7 @@ def _find_persistent_dir():
             test = mp / '.tester_write_test'
             test.write_text('x')
             test.unlink()
-            return mp          # first writable real mount wins
+            return mp
         except:
             continue
     return None
@@ -134,10 +117,8 @@ def _config_file():
             return d / 'tester_config.json'
         except:
             pass
-    # Fallback: next to the script (works on non-Frugal systems)
     return Path(sys.argv[0]).resolve().parent / '.tester_config.json'
 
-# Resolve once at startup so every call is instant
 CONFIG_FILE = _config_file()
 
 def load_cfg():
@@ -168,37 +149,34 @@ def _infer_ram_type_from_cpu(cpu_string):
     """
     Infer DDR generation from CPU model string.
     Returns e.g. 'DDR4' or None if we can't tell.
-    Intel: model number first digit(s) = generation.
-    AMD Ryzen: series number maps to DDR gen.
     """
     s = cpu_string.upper()
 
-    # Intel Core iX-NNNN  (e.g. i5-8250U → 8th gen → DDR4)
     m = re.search(r'\bI[3579]-(\d{4,5})', s)
     if m:
         gen = int(m.group(1)) // 1000
-        if gen <= 3:   return 'DDR3'
-        if gen <= 5:   return 'DDR3'   # Broadwell era
+        if gen <= 5:   return 'DDR3'
         if gen <= 11:  return 'DDR4'
-        return 'DDR4'   # 12th/13th gen could be DDR5 but DDR4 is more common
+        return 'DDR4'
 
-    # Intel Core Ultra (12th gen+) → DDR4/DDR5 — default DDR4
     if 'CORE ULTRA' in s:
         return 'DDR4'
 
-    # Intel Celeron / Pentium N/J series (Bay Trail, Gemini Lake) → DDR3/DDR4
     m = re.search(r'\b[NJ](\d{4})', s)
     if m:
         n = int(m.group(1))
         return 'DDR4' if n >= 4000 else 'DDR3'
 
-    # AMD Ryzen NNNN (e.g. Ryzen 5 3500U → 3rd gen → DDR4)
+    # Intel N-series (Alder Lake-N): N100/N200/N305 etc. → DDR4/LPDDR5
+    m = re.search(r'(?:PROCESSOR\s*)?(?:\(R\)\s*)?(N\d{3,4})\b', s)
+    if m:
+        return 'DDR4'
+
     m = re.search(r'RYZEN\s+(?:AI\s+)?[3579]\s+(?:PRO\s+)?(\d{4})', s)
     if m:
         series = int(m.group(1)) // 1000
         return 'DDR5' if series >= 7 else 'DDR4'
 
-    # AMD A-series / Athlon
     if re.search(r'\b(ATHLON|A[468]|A1[02])\b', s):
         return 'DDR4'
 
@@ -211,19 +189,11 @@ def get_system_info():
                 battery_health='Unknown', battery_current='Unknown',
                 battery_cycles='Unknown')
 
-    info['make']   = dmi_read('sys_vendor')   or 'Unknown'
+    info['make'] = dmi_read('sys_vendor') or 'Unknown'
 
-    # On Lenovo ThinkPads/IdeaPads, product_name holds a hardware config code
-    # (e.g. "20AT0020US") while the human-readable name (e.g. "ThinkPad L440")
-    # is in product_version.  Prefer product_version for Lenovo machines when it
-    # looks like a real model name (contains letters AND spaces/digits but is NOT
-    # just a hex/alphanumeric config code).
     _product_name    = dmi_read('product_name')
     _product_version = dmi_read('product_version')
     if (info['make'] or '').upper().startswith('LENOVO') and _product_version:
-        # Use version if it looks like a friendly name (has a space or starts
-        # with a known Lenovo line keyword) and product_name looks like a SKU
-        # (8+ chars, no spaces, mix of letters and digits).
         _sku_pattern     = re.compile(r'^[A-Z0-9]{4,}$', re.I)
         _friendly_kws    = ('thinkpad', 'ideapad', 'thinkbook', 'legion',
                             'yoga', 'slim', 'flex', 'carbon', 'extreme')
@@ -267,8 +237,6 @@ def get_system_info():
         pass
 
     # ── RAM detection ─────────────────────────────────────────────────────────
-    # Run dmidecode directly (no sudo) — PuppyLinux runs as root, so this
-    # works without privilege escalation and returns proper Type: strings.
     try:
         output = subprocess.check_output(
             ['dmidecode', '--type', '17'], text=True, stderr=subprocess.DEVNULL
@@ -278,6 +246,7 @@ def get_system_info():
             if 'Size:' not in device or 'No Module Installed' in device:
                 continue
             size = rtype = 'Unknown'
+            is_soldered = False
             for line in device.splitlines():
                 line = line.strip()
                 if line.startswith('Size:'):
@@ -293,8 +262,13 @@ def get_system_info():
                     t_val = line.split(':', 1)[1].strip()
                     if re.match(r'(LP)?DDR\d+', t_val, re.I):
                         rtype = t_val.split()[0].upper()
+                elif line.startswith('Form Factor:'):
+                    ff = line.split(':', 1)[1].strip().lower()
+                    if ff == 'row of chips':
+                        is_soldered = True
             if size and size.lower() not in ('unknown', '0'):
-                slots.append(size + ' ' + rtype)
+                slot_type = 'Soldered' if is_soldered else rtype
+                slots.append(size + ' ' + slot_type)
         if slots:
             info['ram_slots'] = slots
     except:
@@ -375,14 +349,12 @@ def get_wifi():
     if not iface:
         return 'No WiFi Adapter', False
 
-    # Get connected SSID via iwgetid
     try:
         ssid = subprocess.run(['iwgetid', '-r'], capture_output=True,
                               text=True, timeout=2).stdout.strip()
     except:
         ssid = ''
 
-    # Get IP address via ip addr
     ip = None
     try:
         out = subprocess.run(['ip', '-4', 'addr', 'show', iface],
@@ -445,31 +417,41 @@ def parse_cpu(raw):
                             cpu_type = 'Intel Atom'
                             cpu_series = m.group(1).upper()
                         else:
-                            m = re.search(r'Ryzen\s+AI\s+([3579])\s+(?:(?:Pro|HX)\s+)?(\d{3}\w*)', s, re.I)
+                            # Intel N-series (Alder Lake-N / Gracemont)
+                            # e.g. "Intel(R) Processor(R) N200 @ 1.00GHz"
+                            # e.g. "Intel(R) N100"
+                            m = re.search(r'Processor\s*(?:\(R\)\s*)?(N\d{3,4})\b', s, re.I)
+                            if not m:
+                                m = re.search(r'\bIntel\s*(?:\(R\)\s*)?(N\d{3,4})\b', s, re.I)
                             if m:
-                                cpu_type = 'AMD Ryzen AI ' + m.group(1)
-                                cpu_series = m.group(2)
+                                cpu_type = 'Intel N-Series'
+                                cpu_series = m.group(1).upper()
                             else:
-                                m = re.search(r'Ryzen\s+([3579])\s+(?:Pro\s+)?(\d{4}\w*)', s, re.I)
+                                m = re.search(r'Ryzen\s+AI\s+([3579])\s+(?:(?:Pro|HX)\s+)?(\d{3}\w*)', s, re.I)
                                 if m:
-                                    cpu_type = 'AMD Ryzen ' + m.group(1)
+                                    cpu_type = 'AMD Ryzen AI ' + m.group(1)
                                     cpu_series = m.group(2)
                                 else:
-                                    m = re.search(r'\bA(\d{1,2})-(\d{4}\w*)', s, re.I)
+                                    m = re.search(r'Ryzen\s+([3579])\s+(?:Pro\s+)?(\d{4}\w*)', s, re.I)
                                     if m:
-                                        cpu_type = 'AMD A' + m.group(1)
+                                        cpu_type = 'AMD Ryzen ' + m.group(1)
                                         cpu_series = m.group(2)
                                     else:
-                                        m = re.search(r'Athlon\s+(?:(Silver|Gold)\s+)?(\d{4}\w*)', s, re.I)
+                                        m = re.search(r'\bA(\d{1,2})-(\d{4}\w*)', s, re.I)
                                         if m:
-                                            g = (' ' + m.group(1).title()) if m.group(1) else ''
-                                            cpu_type = 'AMD Athlon' + g
+                                            cpu_type = 'AMD A' + m.group(1)
                                             cpu_series = m.group(2)
                                         else:
-                                            m = re.search(r'\bFX-(\d{4}\w*)', s, re.I)
+                                            m = re.search(r'Athlon\s+(?:(Silver|Gold)\s+)?(\d{4}\w*)', s, re.I)
                                             if m:
-                                                cpu_type = 'AMD FX'
-                                                cpu_series = m.group(1)
+                                                g = (' ' + m.group(1).title()) if m.group(1) else ''
+                                                cpu_type = 'AMD Athlon' + g
+                                                cpu_series = m.group(2)
+                                            else:
+                                                m = re.search(r'\bFX-(\d{4}\w*)', s, re.I)
+                                                if m:
+                                                    cpu_type = 'AMD FX'
+                                                    cpu_series = m.group(1)
     freq_m = re.search(r'@\s*([\d.]+\s*GHz)', s, re.I)
     cpu_freq = freq_m.group(1).replace(' ', '') if freq_m else 'Unknown'
     return cpu_type, cpu_series, cpu_freq
@@ -483,14 +465,16 @@ def parse_ram(slots):
         m = re.search(r'(\d+)\s*GB', s, re.I)
         if m:
             sizes.append(int(m.group(1)))
-        # Match DDR3 / DDR4 / DDR5 / LPDDR4 / LPDDR5 etc.
-        t = re.search(r'(LPDDR\d+|DDR\d+)', s, re.I)
-        if t:
-            ram_type = t.group(1).upper()
+        # Soldered takes priority; otherwise match DDR type
+        if 'Soldered' in s:
+            ram_type = 'Soldered'
+        elif ram_type != 'Soldered':
+            t = re.search(r'(LPDDR\d+|DDR\d+)', s, re.I)
+            if t:
+                ram_type = t.group(1).upper()
     if not sizes:
         return 'Unknown', 'Unknown', 'Unknown'
     sc = Counter(sizes)
-    # Always format as "N x SizeGB [+ N x SizeGB ...]"
     parts = [f'{qty} x {sz}GB' for sz, qty in sc.items()]
     cfg = ' + '.join(parts)
     total = str(sum(sizes)) + 'GB'
@@ -532,7 +516,6 @@ def set_volume(pct=80):
             pass
 
 # ─── Keyboard layout definition ────────────────────────────────────────────────
-# (keysym, display_label, width_in_units)  --  None keysym = invisible spacer
 KB_ROWS = [
     [('Escape','Esc',1.0),(None,'',0.6),
      ('F1','F1',1.0),('F2','F2',1.0),('F3','F3',1.0),('F4','F4',1.0),(None,'',0.3),
@@ -564,7 +547,6 @@ KB_ARROWS = [
     [('Left','\u2190',1.0),('Down','\u2193',1.0),('Right','\u2192',1.0)],
 ]
 
-# Navigation cluster drawn above the arrow keys (right of main block)
 KB_NAV = [
     [('Insert','Ins',1.0), ('Home','Home',1.0), ('Prior','PgUp',1.0)],
     [('Delete','Del',1.0), ('End','End',1.0),   ('Next','PgDn',1.0)],
@@ -579,7 +561,6 @@ KB_ALIAS = {
     'colon':'semicolon','quotedbl':'apostrophe','less':'comma',
     'greater':'period','question':'slash','asciitilde':'grave',
     'KP_Enter':'Return','ISO_Left_Tab':'Tab',
-    # Print/Scroll/Pause have no dedicated key in the layout — alias to F12
     'Print':'F12','Scroll_Lock':'F12','Pause':'F12',
     'KP_0':'0','KP_1':'1','KP_2':'2','KP_3':'3',
     'KP_4':'4','KP_5':'5','KP_6':'6','KP_7':'7','KP_8':'8','KP_9':'9',
@@ -667,7 +648,6 @@ class FooterBar(tk.Frame):
             activebackground='#4a1010', activeforeground=ERROR_C,
             bd=0, relief='flat', padx=22, pady=8, cursor='hand2',
             takefocus=0, command=app.poweroff)
-        # power_btn is packed/unpacked by update_nav
 
     def update_nav(self, idx, total):
         self.title_lbl.config(
@@ -675,7 +655,6 @@ class FooterBar(tk.Frame):
         self.prev_btn.config(
             state='normal' if idx > 0 else 'disabled',
             fg=TEXT if idx > 0 else SUBTEXT)
-        # On the last screen (Sync) swap Next for Power Off
         if idx == total - 1:
             self.next_btn.pack_forget()
             self.power_btn.pack(side='right', padx=12, pady=8)
@@ -710,9 +689,6 @@ class CameraScreen(BaseScreen):
             bg=BG, fg=SUBTEXT).pack(pady=(14, 6))
         self._container = tk.Frame(self, bg='black')
         self._container.pack(expand=True, fill='both', padx=30, pady=(0, 20))
-        # Prevent the label's image from propagating size requests back up to
-        # the root window, which would cause an infinite grow loop on WMs
-        # that don't enforce the -fullscreen geometry themselves.
         self._container.pack_propagate(False)
 
     def on_show(self):
@@ -825,9 +801,6 @@ class SpeakerScreen(BaseScreen):
 # ─── Screen 3 : Keyboard ───────────────────────────────────────────────────────
 class KeyboardScreen(BaseScreen):
     GAP   = 4
-
-    # Total keyboard width in layout-units:
-    #   main block (number row) = 15 units, gap = 0.8, nav/arrow cluster = 3 units
     _TOTAL_UNITS = sum(e[2] for e in KB_ROWS[1]) + 3.0 + 0.8
 
     def __init__(self, parent, app):
@@ -839,13 +812,10 @@ class KeyboardScreen(BaseScreen):
         self._current_key_var = tk.StringVar(value='Current key: None')
         self._current_key_lbl = None
 
-        # Compute UNIT so the keyboard fills ~90 % of screen width,
-        # but also cap it so it fits vertically (header ~50, footer ~50,
-        # title label ~55, legend label ~25 → ~180 px of chrome).
         sw = app.root.winfo_screenwidth()
         sh = app.root.winfo_screenheight()
-        num_rows   = len(KB_ROWS) + 1        # +1 for the arrow/nav rows
-        v_budget   = sh - 180                 # px available for the canvas
+        num_rows   = len(KB_ROWS) + 1
+        v_budget   = sh - 180
         unit_w     = int(sw * 0.90 / self._TOTAL_UNITS)
         unit_h     = int(v_budget / (num_rows + 0.5))
         self.UNIT  = max(40, min(unit_w, unit_h))
@@ -858,9 +828,9 @@ class KeyboardScreen(BaseScreen):
         tk.Label(self, text='KEYBOARD TEST', font=(FONT_SANS, 11, 'bold'),
             bg=BG, fg=SUBTEXT).pack(pady=(14, 3))
         tk.Label(self,
-            text='Press every key — white = untested  ·  '
-                 'bright green = pressed  ·  '
-                 'light green = tested',
+            text='Press every key — white = untested  ·  '
+                 'bright green = pressed  ·  '
+                 'light green = tested',
             font=(FONT_SANS, 10), bg=BG, fg=SUBTEXT).pack()
 
         outer = tk.Frame(self, bg=BG)
@@ -893,8 +863,6 @@ class KeyboardScreen(BaseScreen):
         G  = self.GAP
         LEFT = 6
 
-        # Main keyboard rows
-        # Row 0 (Fn row) gets slightly tighter vertical space
         for ri, row in enumerate(KB_ROWS):
             y = (4 if ri == 0 else RH + (ri - 1) * RH + 10)
             x = LEFT
@@ -906,11 +874,9 @@ class KeyboardScreen(BaseScreen):
                 self._draw_key(ks, lbl, x, y, pw, KH)
                 x += int(w * U)
 
-        # Arrow keys — to the right of the main block
         main_w   = int(sum(e[2] for e in KB_ROWS[1]) * U) + LEFT
         arrow_x0 = main_w + 8
 
-        # Nav cluster (Ins/Home/PgUp / Del/End/PgDn) — above the arrow keys
         for ni, nrow in enumerate(KB_NAV):
             y  = RH + (len(KB_ROWS) - 4 + ni) * RH + 10
             nx = arrow_x0
@@ -937,7 +903,6 @@ class KeyboardScreen(BaseScreen):
         c = self._canvas
         r = c.create_rectangle(x, y, x + w, y + h,
             fill=KEY_IDLE, outline='#9aa0b8', width=1, tags=('key', ks))
-        # Scale font with key size; short labels get a bit larger
         fsz = max(7, int(self.UNIT * (0.20 if len(lbl) <= 5 else 0.17)))
         t = c.create_text(x + w // 2, y + h // 2, text=lbl,
             font=(FONT_SANS, fsz), fill=KEY_TXT_D, tags=('key', ks))
@@ -990,16 +955,8 @@ class KeyboardScreen(BaseScreen):
 
     def on_show(self):
         self._current_key_var.set('Current key: None')
-
-        # bind_all handles every key EXCEPT Tab and Space, which need special
-        # treatment. Instance-level bindings on the canvas fire before Tk's
-        # class-level focus-traversal logic, so returning 'break' here truly
-        # suppresses traversal — unlike bind_all which runs too late.
         self.app.root.bind_all('<KeyPress>',   self._key_down)
         self.app.root.bind_all('<KeyRelease>', self._key_up)
-        # Explicitly grab F10/media-mute globally so Tk doesn't treat F10 as
-        # a menu accelerator and so laptop Fn layers (XF86AudioMute) still
-        # highlight the F10 key on tester layouts.
         self.app.root.bind_all('<F10>',                 self._f10_down)
         self.app.root.bind_all('<KeyRelease-F10>',      self._f10_up)
         self.app.root.bind_all('<XF86AudioMute>',       self._f10_down)
@@ -1010,7 +967,6 @@ class KeyboardScreen(BaseScreen):
         self._canvas.focus_set()
 
     def _block_key(self, ev):
-        """Register the key press visually, suppress Tk's default action."""
         self._key_down(ev)
         return 'break'
 
@@ -1075,7 +1031,6 @@ class InfoScreen(BaseScreen):
         for w in self.winfo_children():
             w.destroy()
 
-        # vw-style font sizing: scale relative to screen width
         sw = self.app.sw
         def vw(pct): return max(8, int(sw * pct / 100))
 
@@ -1221,8 +1176,6 @@ class SyncScreen(BaseScreen):
         ok = False
         msg = ''
         try:
-            # Use a raw socket test so we don't depend on the server having
-            # a specific /ping route — any open port on 5050 means it's up.
             s = socket.create_connection((ip, 5050), timeout=4)
             s.close()
             ok = True
@@ -1303,7 +1256,6 @@ class SyncScreen(BaseScreen):
         tk.Label(hint, text='Press Enter to continue (leave empty for \u201c*\u201d), or press Next \u25ba',
             font=(FONT_SANS, 11), bg=BG, fg=SUBTEXT).pack(anchor='w')
 
-        # Enter submits notes; Shift+Enter inserts a newline without advancing
         self._notes_txt.bind('<Return>', self._confirm_notes_key)
         self._notes_txt.bind('<Shift-Return>', self._newline_in_notes)
 
@@ -1321,7 +1273,6 @@ class SyncScreen(BaseScreen):
             self._notes = '*'
         self._goto(self.STEP_GRADE)
 
-    # Allow Next button to advance from notes step
     def _on_next_from_notes(self):
         self._notes = self._notes_txt.get('1.0', 'end-1c').strip()
 
@@ -1390,7 +1341,7 @@ class SyncScreen(BaseScreen):
         ip   = self._cfg.get('last_ip', '127.0.0.1')
 
         payload = {
-            'model':           info.get('model', 'Unknown'),
+            'model':           short_model(info),  # strip make prefix (e.g. "Lenovo ")
             'serial':          info.get('serial', 'Unknown'),
             'cpu_string':      info.get('cpu_string', 'Unknown'),
             'ram_slots':       info.get('ram_slots', []),
@@ -1405,7 +1356,6 @@ class SyncScreen(BaseScreen):
         try:
             if HAS_REQUESTS:
                 r = req.post('http://' + ip + ':5050/log', json=payload, timeout=8)
-                # Surface HTTP-level errors before trying to parse JSON
                 if r.status_code != 200:
                     msg = f'Server returned HTTP {r.status_code}'
                     try:
@@ -1415,16 +1365,9 @@ class SyncScreen(BaseScreen):
                     except:
                         pass
                 else:
-                    # HTTP 200 means the server accepted the record.
-                    # Parse JSON for an optional human-readable message but do
-                    # NOT fail the sync based on the status field — different
-                    # server versions use different values ("ok", "OK",
-                    # "success", "logged", etc.).
                     ok = True
                     try:
                         data = r.json()
-                        # Only override ok=True if the server explicitly signals
-                        # an error (status field present AND not any ok-ish value)
                         s_val = str(data.get('status', 'ok')).lower()
                         if s_val in ('error', 'fail', 'failed'):
                             ok  = False
@@ -1432,7 +1375,6 @@ class SyncScreen(BaseScreen):
                         else:
                             msg = data.get('message', '')
                     except Exception:
-                        # Non-JSON 200 response is still a success
                         msg = ''
             else:
                 msg = 'requests library not installed — pip install requests'
@@ -1446,7 +1388,6 @@ class SyncScreen(BaseScreen):
         self.after(0, lambda: self._send_result(ok, msg))
 
     def _send_result(self, ok, msg):
-        # Set these BEFORE _goto, because _goto -> _render -> _show_done reads them
         self._last_ok  = ok
         self._last_msg = msg
         self._goto(self.STEP_DONE)
@@ -1466,7 +1407,7 @@ class SyncScreen(BaseScreen):
             tk.Label(box, text='Synced Successfully!',
                 font=(FONT_SANS, 26, 'bold'), bg=BG, fg=SUCCESS).pack(pady=4)
             tk.Label(box,
-                text=info.get('model', 'Unknown') + '  \u00b7  CSAD: ' + self._csad.get(),
+                text=short_model(info) + '  \u00b7  CSAD: ' + self._csad.get(),
                 font=(FONT_SANS, 14), bg=BG, fg=SUBTEXT).pack(pady=4)
         else:
             tk.Label(box, text='\u2717',
@@ -1492,11 +1433,9 @@ class SyncScreen(BaseScreen):
         self._step = step
         self._render()
 
-    # Hook called by App.next_screen() when leaving this screen mid-flow
     def handle_next(self):
         """Return True to allow navigation, False to block."""
         if self._step == self.STEP_NOTES:
-            # Capture notes before leaving
             try:
                 self._notes = self._notes_txt.get('1.0', 'end-1c').strip()
             except:
@@ -1509,17 +1448,6 @@ class App:
         self.root = tk.Tk()
         self.root.title('LaptopTester')
         self.root.configure(bg=BG)
-        # Fullscreen strategy for PuppyLinux / JWM and other X11 WMs:
-        #
-        # We use the EWMH _NET_WM_STATE_FULLSCREEN hint via Tk's -fullscreen
-        # attribute.  This tells the window manager to give our window the full
-        # screen, remove decorations, and slide the taskbar/panel beneath us —
-        # even on JWM which honours the hint.  This is more reliable than
-        # overrideredirect, which bypasses the WM but leaves the taskbar's own
-        # override-redirect window free to paint over us.
-        #
-        # Belt-and-suspenders: we also set -topmost and re-assert fullscreen
-        # after a short delay in case the WM needs a moment to settle.
         self.root.attributes('-fullscreen', True)
         self.root.attributes('-topmost', True)
         self.root.focus_force()
@@ -1531,15 +1459,12 @@ class App:
         self.root.after(200, _reassert_fullscreen)
         self.root.after(800, _reassert_fullscreen)
 
-        # Store screen dimensions for other widgets to use
         self.sw = self.root.winfo_screenwidth()
         self.sh = self.root.winfo_screenheight()
 
         self.system_info  = {}
         self._idx         = 0
         self._active      = None
-        # When True (keyboard screen active), Tab/Space/NextWindow are intercepted
-        # at the App level so they never cause focus traversal.
         self.kb_block_traversal = False
 
         threading.Thread(target=self._load_info, daemon=True).start()
@@ -1591,7 +1516,6 @@ class App:
     def next_screen(self):
         if self._idx >= len(self._screens) - 1:
             return
-        # Let sync screen capture notes before leaving
         if hasattr(self._active, 'handle_next'):
             self._active.handle_next()
         self._show(self._idx + 1)
@@ -1609,7 +1533,6 @@ class App:
         self.root.destroy()
 
     def poweroff(self):
-        """Immediate poweroff with several fallbacks for Puppy/Linux systems."""
         commands = [
             ['busybox', 'poweroff', '-f'],
             ['poweroff', '-f'],
@@ -1624,13 +1547,11 @@ class App:
         for cmd in commands:
             try:
                 subprocess.Popen(cmd)
-                # close the app immediately so the WM doesn't keep focus weirdness
                 self.root.after(100, self.root.destroy)
                 return
             except Exception:
                 pass
 
-        # last-resort status message if everything failed
         try:
             print("Poweroff command failed.")
         except:
